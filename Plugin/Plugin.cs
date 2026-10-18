@@ -60,6 +60,17 @@ namespace RoseNet
                 "Log every guest button change and what the virtual gamepad reports back. For bug reports.");
             var bossCheat = Config.Bind("Debug", "BossLowHealthKey", false,
                 "Testing only: F9 drops every living boss in your room to 1 HP (in both games). Leave off for normal play.");
+            var scale = Config.Bind("Difficulty", "Enabled", true,
+                "Souls-style co-op difficulty: monsters and bosses get more health while both players are in the room.");
+            float[] Factors(string what, float p2, float p3, float p4)
+            {
+                return new[] { 1f, 1f,
+                    Config.Bind("Difficulty", $"{what}Health2Players", p2, $"{what} health multiplier with 2 players (Elden Ring uses about this).").Value,
+                    Config.Bind("Difficulty", $"{what}Health3Players", p3, $"{what} health multiplier with 3 players (for later; Blood Pact is 2 players today).").Value,
+                    Config.Bind("Difficulty", $"{what}Health4Players", p4, $"{what} health multiplier with 4 players (for later).").Value };
+            }
+            var monsterHealth = Factors("Monster", 1.3f, 1.5f, 1.6f);
+            var bossHealth = Factors("Boss", 1.6f, 2.3f, 2.7f);
             var probe = Config.Bind("Probe", "Enabled", false,
                 "Write every room entered and every enemy spawned/killed to BepInEx\\RoseNetProbe\\. Used to compare two PCs before online sync.");
 
@@ -108,6 +119,9 @@ namespace RoseNet
                 ShowNames = showNames.Value,
                 ShowStatus = showStatus.Value,
                 BossLowHealthKey = bossCheat.Value,
+                ScaleDifficulty = scale.Value,
+                MonsterHealth = monsterHealth,
+                BossHealth = bossHealth,
             };
 
             if (settings.Role != Role.Off)

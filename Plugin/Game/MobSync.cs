@@ -746,7 +746,12 @@ namespace RoseNet.Game
             if (d == null || d.currentHealth == s.Health) return;
             if (MobControl.LastLocalHit.TryGetValue(mob.Pointer, out var hitAt) && Time.unscaledTime - hitAt < 0.6f && s.Health > d.currentHealth) return;
             if (healthSyncBroken) return;
-            try { d.currentHealth = Math.Max(1, s.Health); BossHud.Refresh(mob, d); }
+            try
+            {
+                if (s.MaxHealth > 0 && d.maxHealth != s.MaxHealth) d.maxHealth = s.MaxHealth;   // co-op scaling
+                d.currentHealth = Math.Max(1, s.Health);
+                BossHud.Refresh(mob, d);
+            }
             catch (Exception e)
             {
                 healthSyncBroken = true; // don't try (and fail) every frame
@@ -1123,6 +1128,63 @@ namespace RoseNet.Game
                 broken = true;
                 Plugin.Logger.LogWarning($"[Session] Could not refresh the boss health bar: {e.Message}");
             }
+        }
+    }
+
+    // Co-op difficulty, like the Souls games: while both players are in a room we run, its monsters (and more so
+    // its boss) get more health; when the other player leaves, they go back. The other game copies health.
+    internal static class CoopScaling
+    {
+        static readonly Dictionary<IntPtr, (Entity mob, float factor)> scaled = new Dictionary<IntPtr, (Entity, float)>();
+        static float nextCheck;
+        static int logs = 10;
+
+        static void Scale(Entity mob, Damageable d, float f)
+        {
+            int max = d.maxHealth, cur = d.currentHealth;
+            d.maxHealth = Mathf.Max(1, Mathf.RoundToInt(max * f));
+            if (cur > 0) d.currentHealth = Mathf.Clamp(Mathf.RoundToInt(cur * f), 1, d.maxHealth);
+            BossHud.Refresh(mob, d);
+        }
+
+        public static void Apply(string roomId, float monster, float boss)
+        {
+            if (Time.unscaledTime < nextCheck) return;
+            nextCheck = Time.unscaledTime + 0.5f;
+            foreach (var kv in MobRegistry.ById)
+            {
+                var mob = kv.Value;
+                if (mob == null || scaled.ContainsKey(mob.Pointer) || !MobRegistry.InRoom(kv.Key, roomId) || !MobRegistry.IsAlive(mob)) continue;
+                try
+                {
+                    var d = MobControl.DamageableOf(mob);
+                    if (d == null || d.maxHealth <= 0) continue;
+                    float f = mob.GetComponent<BossComponent>() != null ? boss : monster;
+                    if (Mathf.Approximately(f, 1f)) continue;
+                    int before = d.maxHealth;
+                    Scale(mob, d, f);
+                    scaled[mob.Pointer] = (mob, f);
+                    if (logs-- > 0) Plugin.Logger.LogInfo($"[Session] Co-op difficulty: '{MobRegistry.PrefabName(mob)}' health {before} -> {d.maxHealth} (x{f:0.##}).");
+                }
+                catch { }
+            }
+        }
+
+        public static void RevertAll()
+        {
+            if (scaled.Count == 0) return;
+            foreach (var kv in scaled)
+            {
+                try
+                {
+                    var mob = kv.Value.mob;
+                    if (mob == null || !MobRegistry.IsAlive(mob)) continue;
+                    var d = MobControl.DamageableOf(mob);
+                    if (d != null) Scale(mob, d, 1f / kv.Value.factor);
+                }
+                catch { }
+            }
+            scaled.Clear();
         }
     }
 

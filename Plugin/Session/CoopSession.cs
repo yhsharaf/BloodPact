@@ -24,6 +24,9 @@ namespace RoseNet.Session
         public bool ShowNames = true;
         public bool ShowStatus = true;
         public bool BossLowHealthKey;   // testing: F9 drops the bosses in our room to 1 HP
+        public bool ScaleDifficulty = true;
+        public float[] MonsterHealth = { 1f, 1f, 1.3f, 1.5f, 1.6f };   // by player count (index)
+        public float[] BossHealth = { 1f, 1f, 1.6f, 2.3f, 2.7f };
     }
 
     // Milestone 2: each PC plays its own Rose; both stream their Rose (room, position, bone pose and the
@@ -339,6 +342,10 @@ namespace RoseNet.Session
 
             if (iOwnRoom && together) MobCulling.KeepAnimating(trackedRoom);
             else MobCulling.Restore();
+            // Souls-style co-op difficulty: more health while both players are in the room we run.
+            if (iOwnRoom && together && Settings.ScaleDifficulty)
+                CoopScaling.Apply(trackedRoom, Settings.MonsterHealth[2], Settings.BossHealth[2]);
+            else CoopScaling.RevertAll();
 
             if (iOwnRoom)
             {
