@@ -77,6 +77,64 @@ namespace RoseNet.Game
         }
 
         // 0 = our Rose, >0 = one of our tracked projectiles, -1 = not ours (enemies, puppets, ...).
+        // Parts of an effect that act on the whole screen or the player's own controls: camera shake, fades
+        // (falling into spikes fades to black), hit flashes, slow motion, rumble, HUD. On the other player's
+        // stand-in they would hit OUR screen, so only the parts drawn on their body are played.
+        static readonly HashSet<string> ScreenParts = new HashSet<string>
+        {
+            "CameraImpulseFeedbackFeature", "CameraShakeFeedbackFeature", "DeathBreakScreenEffectFeedbackFeature",
+            "EnvironmentDarkenFeedbackFeature", "BackgroundDarkenerFeedbackFeature", "SkyThunderFeedbackFeature",
+            "FadeFromBlackFeedbackFeature", "FadeFromColorFeedbackFeature", "FadeToBlackFeedbackFeature", "FadeToColorFeedbackFeature",
+            "DrawFullscreenQuadFeedbackFeature", "LensDistortionFeedbackFeature", "VignetteFeedbackFeature",
+            "ColorAdjustmentFeedbackFeature", "ColorFilterAdjustmentFeedbackFeature", "ContrastAdjustmentFeedbackFeature",
+            "PostExposureAdjustmentFeedbackFeature", "SaturationAdjustmentFeedbackFeature", "CustomPostProcessFeedbackFeature",
+            "PostProcessingFeedbackFeature", "PostProcessOverTimeFeedbackFeature", "TimeDilatationFullscreenEffectFeedbackFeature",
+            "SlowMoFeedbackFeature", "TimelapseFeedbackFeature", "RumbleFeedbackFeature", "LetterBoxingFeedbackFeature",
+            "UIFeedbackFeature", "ChangeAlphaUIFeedbackFeature", "PopUpFeedbackFeature", "BossHUDInvulnerabilityFeedbackFeature",
+        };
+        static readonly Dictionary<IntPtr, List<FeedbackFeature>> screenPartsOf = new Dictionary<IntPtr, List<FeedbackFeature>>();
+        static readonly HashSet<string> loggedDrops = new HashSet<string>();
+
+        static List<FeedbackFeature> ScreenPartsOf(Feedback f)
+        {
+            if (screenPartsOf.TryGetValue(f.Pointer, out var list)) return list;
+            list = new List<FeedbackFeature>();
+            try
+            {
+                var parts = f.subAssetList;
+                if (parts != null)
+                    for (int i = 0; i < parts.Count; i++)
+                    {
+                        var part = parts[i];
+                        if (part != null && ScreenParts.Contains(part.GetIl2CppType().Name)) list.Add(part);
+                    }
+            }
+            catch { }
+            screenPartsOf[f.Pointer] = list;
+            if (list.Count > 0 && loggedDrops.Count < 40 && loggedDrops.Add(f.name))
+            {
+                var names = new List<string>();
+                foreach (var p in list) names.Add(p.GetIl2CppType().Name.Replace("FeedbackFeature", ""));
+                Plugin.Logger.LogInfo($"[Session] The other Rose's '{f.name}': not playing its screen parts here ({string.Join(", ", names)}).");
+            }
+            return list;
+        }
+
+        // Start an effect of the other player on their stand-in without its screen-wide parts: they are switched
+        // off just while the effect starts (the shared asset is ours too) and switched back on right after.
+        public static Il2CppSystem.Guid StartBodyOnly(FeedbackContainer container, Feedback f)
+        {
+            var off = new List<FeedbackFeature>();
+            try
+            {
+                foreach (var part in ScreenPartsOf(f))
+                    if (part.isActive) { part.SetActive(false); off.Add(part); }
+            }
+            catch { }
+            try { return container.StartFeedback(f); }
+            finally { foreach (var part in off) { try { part.SetActive(true); } catch { } } }
+        }
+
         internal static int TargetOf(FeedbackContainer container)
         {
             if (!Enabled || LocalEntity == IntPtr.Zero) return -1;

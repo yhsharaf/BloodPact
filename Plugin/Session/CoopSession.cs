@@ -876,7 +876,7 @@ namespace RoseNet.Session
                         break;
                     }
                     var container = target == 0 ? puppet.Effects : projectiles.EffectsOf(target);
-                    Il2CppSystem.Guid? started = container != null ? container.StartFeedback(feedback) : (Il2CppSystem.Guid?)null;
+                    Il2CppSystem.Guid? started = container != null ? EffectRelay.StartBodyOnly(container, feedback) : (Il2CppSystem.Guid?)null;
                     if (started.HasValue) remoteEffects[id] = (container, started.Value);
                     if (started.HasValue && name.Contains("Attack")) LastRemoteAttack = name;
                     if (loggedEffects.Count < 20 && loggedEffects.Add(name))
