@@ -178,6 +178,14 @@ namespace RoseNet.Game
         // The other player set off an encounter: go there, then start it here too.
         internal static void OnRemoteStart(Start s)
         {
+            // Our teleport only reaches places in the area loaded here; another area would leave us in the void.
+            string here = GameAccess.CurrentRoomId();
+            if (PartnerMap.Area(s.BossRoom) != PartnerMap.Area(here))
+            {
+                Plugin.Logger.LogInfo($"[Session] The other player wants to fight the boss in {s.BossRoom}, but we are in another area ({here}); not teleporting.");
+                BossIntro.CallOver("Your partner is fighting a boss in another area.");
+                return;
+            }
             pending = s;
             pendingSince = Time.unscaledTime;
             teleports = 0;
@@ -197,10 +205,11 @@ namespace RoseNet.Game
             var me = GameAccess.MainCharacter();
             if (me == null || GameAccess.IsLoadingRoom) return;
             string room = GameAccess.CurrentRoomId();
-            if (room == s.BossRoom) { pending = null; return; }   // already in the arena
+            if (room == s.BossRoom) { pending = null; BossIntro.CallOver(); return; }   // already in the arena
             if (room == s.Room && teleports > 0)
             {
                 pending = null;
+                BossIntro.CallOver();
                 Plugin.Logger.LogInfo("[Session] At the boss gates; walk in to join the fight.");
                 return;
             }
@@ -208,6 +217,7 @@ namespace RoseNet.Game
             {
                 Plugin.Logger.LogWarning("[Session] Could not reach the boss gates; giving up.");
                 pending = null;
+                BossIntro.CallOver("Couldn't join the boss fight.");
                 return;
             }
             // Bring our Rose next to the other player in the boss room (before their fight has started).

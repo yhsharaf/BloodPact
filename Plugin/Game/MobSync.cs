@@ -690,6 +690,11 @@ namespace RoseNet.Game
                     // The owner is leaving: its monsters vanish from its stream as its room unloads. They are
                     // not dead; leave them be until we take them over.
                     if (!ownerHere) continue;
+                    // A boss leaves the owner's world only when it falls: our copy gets the game's own death
+                    // from the shared victory (that ends the fight and drops the rewards here). Never hide it.
+                    bool isBoss = false;
+                    try { isBoss = mob.GetComponent<BossComponent>() != null; } catch { }
+                    if (isBoss) continue;
                     // Gone from the owner's world. If we just saw it alive, the owner killed it: play the death
                     // here, then take it out of the level once the death has played.
                     if (wasStreamed.Remove(kv.Key) && MobRegistry.IsAlive(mob)) PlayDeath(mob, anyLocalEntity);
@@ -1023,8 +1028,19 @@ namespace RoseNet.Game
         void Hide(Entity mob)
         {
             if (!hidden.Add(mob.Pointer)) return;
+            try { if (mob.GetComponent<BossComponent>() != null) Plugin.Logger.LogInfo($"[BossDiag] Hiding boss '{MobRegistry.PrefabName(mob)}': it is gone from the owner's monsters."); } catch { }
             foreach (var r in mob.GetComponentsInChildren<Renderer>(true)) r.enabled = false;
+            hiddenFrom[mob.Pointer] = mob.transform.position;
             mob.transform.position = Away;
+        }
+
+        readonly Dictionary<IntPtr, Vector3> hiddenFrom = new Dictionary<IntPtr, Vector3>();
+
+        public void ShowAgain(Entity mob)
+        {
+            if (mob == null || !Unhide(mob)) return;
+            if (hiddenFrom.TryGetValue(mob.Pointer, out var at)) mob.transform.position = at;
+            hiddenFrom.Remove(mob.Pointer);
         }
 
         bool Unhide(Entity mob)
@@ -1036,8 +1052,20 @@ namespace RoseNet.Game
 
         // We became the owner (or the other player left): the visible monsters go back to their AI where
         // they are. Hidden ones were dead in the owner's world, so they stay hidden and under our control.
-        public void Release()
+        // The monsters the last Release handed back to our AI.
+        public readonly List<Entity> Released = new List<Entity>();
+
+        public void Release(bool healthWasScaled = false)
         {
+            // Their health came from the owner, who had already raised it for co-op: don't raise it again.
+            if (healthWasScaled)
+                foreach (var kv in MobRegistry.ById)
+                    if (kv.Value != null && MobControl.Possessed.Contains(kv.Value.Pointer) && !hidden.Contains(kv.Value.Pointer))
+                        CoopScaling.Adopt(kv.Value);
+            Released.Clear();
+            foreach (var kv in MobRegistry.ById)
+                if (kv.Value != null && MobControl.Possessed.Contains(kv.Value.Pointer) && !hidden.Contains(kv.Value.Pointer))
+                    Released.Add(kv.Value);
             MobControl.Possessed.Clear();
             foreach (var p in hidden) MobControl.Possessed.Add(p);
             latest.Clear();
@@ -1133,6 +1161,151 @@ namespace RoseNet.Game
 
     // Co-op difficulty, like the Souls games: while both players are in a room we run, its monsters (and more so
     // its boss) get more health; when the other player leaves, they go back. The other game copies health.
+    // A boss we take over mid-fight (its owner fell) was driven by the owner's stream, never by our AI: it
+    // carries their target and whatever move they were in. Point it at our Rose as a fresh target (the game then
+    // sets the fight up for it, as when a boss first notices you) and, if it still stands still, drop the
+    // leftover moves so its AI picks a new one.
+    internal static class TakeoverWatch
+    {
+        sealed class Watched { public Entity Mob; public string Name; public Vector3 Pos; public float Since, LastMove, NextLog; public bool Unstuck; }
+        static readonly List<Watched> watched = new List<Watched>();
+
+        static string Actions(Entity mob)
+        {
+            try
+            {
+                var actor = mob.GetComponent<Actor>();
+                var list = actor != null ? actor.activeActions : null;
+                if (list == null || list.Count == 0) return "none";
+                var sb = new StringBuilder();
+                for (int i = 0; i < list.Count; i++) sb.Append(list[i].data != null ? list[i].data.name : "?").Append('@').Append(list[i].frameInfo.integerFrame).Append(' ');
+                return sb.ToString().TrimEnd();
+            }
+            catch { return "?"; }
+        }
+
+        static string TargetName(Entity mob)
+        {
+            try
+            {
+                var t = mob.GetComponent<AIStateComponent>()?.target;
+                if (t == null) return "nobody";
+                var me = GameAccess.MainCharacter();
+                if (me != null && t.Pointer == me.Pointer) return "our Rose";
+                if (Puppet.Current != null && t.Pointer == Puppet.Current.Pointer) return "the other player's stand-in";
+                return t.name;
+            }
+            catch { return "?"; }
+        }
+
+        public static void Begin(IEnumerable<Entity> mobs)
+        {
+            var me = GameAccess.MainCharacter();
+            foreach (var mob in mobs)
+            {
+                if (mob == null || mob.GetComponent<BossComponent>() == null) continue;
+                string name = MobRegistry.PrefabName(mob);
+                try
+                {
+                    var ai = mob.GetComponent<AIStateComponent>();
+                    if (ai != null && me != null)
+                    {
+                        ai.lastFrameTarget = null;   // the next think sees a new target: the boss "notices" us
+                        ai.target = me;
+                    }
+                }
+                catch { }
+                Plugin.Logger.LogInfo($"[Session] Took over boss '{name}' at x {mob.transform.position.x:0.0}: running {Actions(mob)}; now targets {TargetName(mob)}.");
+                watched.Add(new Watched { Mob = mob, Name = name, Pos = mob.transform.position, Since = Time.unscaledTime, LastMove = Time.unscaledTime, NextLog = Time.unscaledTime + 3f });
+            }
+        }
+
+        public static void Tick()
+        {
+            for (int i = watched.Count - 1; i >= 0; i--)
+            {
+                var w = watched[i];
+                float age = Time.unscaledTime - w.Since;
+                if (w.Mob == null || !MobRegistry.IsAlive(w.Mob) || MobControl.IsPossessed(w.Mob) || age > 30f) { watched.RemoveAt(i); continue; }
+                Vector3 pos;
+                try { pos = w.Mob.transform.position; } catch { watched.RemoveAt(i); continue; }
+                bool moved = Vector3.Distance(pos, w.Pos) > 0.5f;
+                if (!w.Unstuck && !moved && Time.unscaledTime - w.LastMove > 4f)
+                {
+                    w.Unstuck = true;
+                    string before = Actions(w.Mob);
+                    try
+                    {
+                        var actor = w.Mob.GetComponent<Actor>();
+                        var list = actor != null ? actor.activeActions : null;
+                        if (list != null)
+                        {
+                            var stop = new List<ActionInstance>();
+                            for (int j = 0; j < list.Count; j++) stop.Add(list[j]);
+                            foreach (var a in stop) { try { actor.StopAction(w.Mob, a, null); } catch { } }
+                        }
+                    }
+                    catch { }
+                    Plugin.Logger.LogInfo($"[Session] Boss '{w.Name}' stood still after the takeover; stopped its leftover moves ({before}). Now: {Actions(w.Mob)}; targets {TargetName(w.Mob)}.");
+                }
+                if (Time.unscaledTime >= w.NextLog)
+                {
+                    w.NextLog = Time.unscaledTime + 3f;
+                    Plugin.Logger.LogInfo($"[Session] Boss '{w.Name}' after takeover (+{age:0}s): x {pos.x:0.0} y {pos.y:0.0}, running {Actions(w.Mob)}; targets {TargetName(w.Mob)}.");
+                }
+                if (moved) { w.Pos = pos; w.LastMove = Time.unscaledTime; }   // stuck = no movement for 4 s
+            }
+        }
+    }
+
+    // Boss diagnostics: every change in a boss's moves, with where it is, its health and (for Leon) its phase.
+    internal static class BossDiag
+    {
+        static readonly Dictionary<IntPtr, string> last = new Dictionary<IntPtr, string>();
+        static float nextScan;
+        static int logs = 1500;
+
+        static string Phase(Entity mob)
+        {
+            try
+            {
+                var leon = mob.GetComponentInChildren<LeonState>(true);
+                if (leon != null) return $" phase {leon.currentPhase}/{leon.currentFightPhase}";
+            }
+            catch { }
+            return "";
+        }
+
+        public static void Tick(string roomId, bool owner)
+        {
+            if (logs <= 0 || Time.unscaledTime < nextScan) return;
+            nextScan = Time.unscaledTime + 0.1f;
+            foreach (var kv in MobRegistry.ById)
+            {
+                var mob = kv.Value;
+                try
+                {
+                    if (mob == null || !MobRegistry.InRoom(kv.Key, roomId) || mob.GetComponent<BossComponent>() == null) continue;
+                    var actor = mob.GetComponent<Actor>();
+                    var list = actor != null ? actor.activeActions : null;
+                    var sb = new StringBuilder();
+                    if (list != null) for (int i = 0; i < list.Count; i++) sb.Append(list[i].data != null ? list[i].data.name : "?").Append(' ');
+                    string sig = sb.ToString().TrimEnd() + Phase(mob);
+                    if (last.TryGetValue(mob.Pointer, out var was) && was == sig) continue;
+                    last[mob.Pointer] = sig;
+                    var p = mob.transform.position;
+                    var d = MobControl.DamageableOf(mob);
+                    string hp = d != null ? $"{d.currentHealth}/{d.maxHealth}" : "?";
+                    bool shown = false;
+                    foreach (var r in mob.GetComponentsInChildren<Renderer>(false)) if (r.enabled) { shown = true; break; }
+                    logs--;
+                    Plugin.Logger.LogInfo($"[BossDiag] {(owner ? "owner" : "mirror")} '{MobRegistry.PrefabName(mob)}' at {p.x:0.0},{p.y:0.0} hp {hp}{(shown ? "" : " (not drawn)")}{(mob.gameObject.activeInHierarchy ? "" : " (inactive)")}: {sig}");
+                }
+                catch { }
+            }
+        }
+    }
+
     internal static class CoopScaling
     {
         static readonly Dictionary<IntPtr, (Entity mob, float factor)> scaled = new Dictionary<IntPtr, (Entity, float)>();
@@ -1168,6 +1341,19 @@ namespace RoseNet.Game
                 }
                 catch { }
             }
+        }
+
+        // A monster we take over from the other game: its health already includes the owner's co-op raise.
+        public static void Adopt(Entity mob)
+        {
+            var settings = RoseNet.Session.CoopSession.Settings;
+            if (mob == null || settings == null || !settings.ScaleDifficulty || scaled.ContainsKey(mob.Pointer)) return;
+            try
+            {
+                float f = mob.GetComponent<BossComponent>() != null ? settings.BossHealth[2] : settings.MonsterHealth[2];
+                if (!Mathf.Approximately(f, 1f)) scaled[mob.Pointer] = (mob, f);
+            }
+            catch { }
         }
 
         public static void RevertAll()
@@ -1277,6 +1463,8 @@ namespace RoseNet.Game
     {
         // Runs after all of the game's late systems (animation included) each frame.
         internal static Action AfterGameLateUpdate;
+        // Puts a hidden monster back (drawn, at its last streamed spot).
+        internal static Action<Entity> ShowAgain;
         // Runs right after the game animates a monster we mirror.
         internal static Action<Entity> AfterMobAnimated;
 
@@ -1494,6 +1682,48 @@ namespace RoseNet.Game
                 bool stale = Puppet.Current != null && ai.target.Pointer == Puppet.Current.Pointer && !MobTargeting.PuppetHere();
                 if (!stale && !MobTargeting.Due(__0)) return;
                 MobTargeting.TryPickCloser(__0, ai, acquiring: false);
+            }
+            catch { }
+        }
+
+        // "Should I give up on my target?" reads the target's health component, which the other player's
+        // stand-in doesn't have (it would fail every frame, breaking that monster's thinking). Decide it here:
+        // keep chasing them while they are here and alive; otherwise let go (the once-a-second check picks again).
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(BasicBrain), nameof(BasicBrain.TargetUnacquisition))]
+        static bool PuppetUnacquisition(BasicBrain.ThinkingContext __0, ref bool __result)
+        {
+            try
+            {
+                var ai = __0?.aiState;
+                var t = ai?.target;
+                if (t == null || !Puppet.Entities.Contains(t.Pointer)) return true;
+                if (MobTargeting.PuppetHere()) { __result = false; return false; }
+                ai.target = null;
+                __result = true;
+                return false;
+            }
+            catch { return true; }
+        }
+
+        // Some boss moves act on their target's body (Leon's phase change starts a move on it). The stand-in has
+        // no body to move, and the boss's move fails halfway: aim those at our own Rose instead.
+        static int phaseLogs = 5;
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(Actor), nameof(Actor.StartActionInternal))]
+        static void BodyMovesOnRealRose(Entity __0, ActionData __1)
+        {
+            try
+            {
+                if (__0 == null || __1 == null || MobControl.IsPossessed(__0)) return;
+                string n = __1.name;
+                if (n == null || n.IndexOf("ChangePhase", StringComparison.OrdinalIgnoreCase) < 0) return;
+                var ai = __0.GetComponent<AIStateComponent>();
+                var me = GameAccess.MainCharacter();
+                if (ai == null || ai.target == null || me == null || !Puppet.Entities.Contains(ai.target.Pointer)) return;
+                ai.target = me;
+                if (phaseLogs-- > 0) Plugin.Logger.LogInfo($"[Session] '{MobRegistry.PrefabName(__0)}' {n}: aimed at our Rose (the stand-in can't be moved).");
             }
             catch { }
         }

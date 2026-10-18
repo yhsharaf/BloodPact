@@ -69,7 +69,8 @@ namespace RoseNet.Session
         void Update()
         {
             // A boss intro held for the other player must always let go, connected or not.
-            try { if (!welcomed) BossIntro.Forget(); BossIntro.Tick(); Spectate.Tick(); Victory.Tick(); BossCheat.Tick(Settings != null && Settings.BossLowHealthKey); } catch { }
+            try { if (!welcomed) BossIntro.Forget(); BossIntro.Tick(); Spectate.Tick(); Victory.Tick(); BossCheat.Tick(Settings != null && Settings.BossLowHealthKey); TakeoverWatch.Tick(); } catch { }
+            try { KeepWorldRunning(); } catch { }
             try { Tick(); }
             catch (Exception e)
             {
@@ -146,6 +147,24 @@ namespace RoseNet.Session
             WatchOwnDeath();
         }
 
+        // ---- pausing: online, like the Souls games, the menu doesn't stop the world ----
+        // The game pauses by stopping time. Whoever runs a room's monsters (a boss too) would freeze them for
+        // both players, and fights, holds and timers would stall. While a partner is connected, time keeps going
+        // (the menu still opens; our own Rose just stands there). Only our "Fight together?" question stops it.
+        bool loggedPause;
+
+        void KeepWorldRunning()
+        {
+            if (!welcomed || !haveRemote || BossIntro.Frozen || Time.timeScale > 0.01f) return;
+            if (GameAccess.IsLoadingRoom || GameAccess.MainCharacter() == null) return;
+            Time.timeScale = 1f;
+            if (!loggedPause)
+            {
+                loggedPause = true;
+                Plugin.Logger.LogInfo("[Session] The game tried to stop time (pause menu?); online the world keeps running.");
+            }
+        }
+
         // ---- deaths: a dead player's stand-in is no target, and the survivor takes over the room ----
         bool weAreDead, remoteDead;
 
@@ -161,6 +180,18 @@ namespace RoseNet.Session
             w.Write(dead);
             transport.Send(writer.Buffer, writer.Length, true);
             Plugin.Logger.LogInfo(dead ? "[Session] Our Rose died; telling the other player." : "[Session] Our Rose is back.");
+            // We ran this room (a boss fight too) and fell: the survivor's game carries on with its monsters, so
+            // ours now follows theirs (spectating shows their fight, their hits and the boss's health).
+            float now = Time.unscaledTime;
+            if (dead && iOwnRoom && !remoteDead && RemoteInMyRoom(now))
+            {
+                iOwnRoom = false;
+                ownerAwaySince = -1;
+                lastStreamAt = now;   // give their stream a moment before anyone claims the room again
+                roomEnteredAt = now;
+                describedMobs.Clear();
+                Plugin.Logger.LogInfo("[Session] We fell; the other player's game runs this room's monsters now.");
+            }
         }
 
         void OnRemoteDeath(bool dead)
@@ -174,8 +205,9 @@ namespace RoseNet.Session
                 iOwnRoom = true;
                 ownerAwaySince = -1;
                 describedMobs.Clear();
-                mobMirror.Release();
+                mobMirror.Release(healthWasScaled: true);
                 Plugin.Logger.LogInfo("[Session] We run this room's monsters now (the other player fell).");
+                TakeoverWatch.Begin(mobMirror.Released);
             }
         }
 
@@ -322,7 +354,7 @@ namespace RoseNet.Session
                 {
                     iOwnRoom = true;
                     describedMobs.Clear();
-                    mobMirror.Release();
+                    mobMirror.Release(healthWasScaled: true);
                     Plugin.Logger.LogInfo("[Session] The other player left the room; we run its monsters now.");
                 }
                 // We came in at the same moment and each took the other for the owner: nobody runs the room.
@@ -340,6 +372,7 @@ namespace RoseNet.Session
                 }
             }
 
+            BossDiag.Tick(trackedRoom, iOwnRoom);
             if (iOwnRoom && together) MobCulling.KeepAnimating(trackedRoom);
             else MobCulling.Restore();
             // Souls-style co-op difficulty: more health while both players are in the room we run.
@@ -1160,10 +1193,14 @@ namespace RoseNet.Session
         {
             MobPatches.AfterGameLateUpdate = () => { if (welcomed && !iOwnRoom) mobMirror.LateApply(trackedRoom); };
             MobPatches.AfterMobAnimated = mob => { if (welcomed && !iOwnRoom) mobMirror.AfterAnimated(mob); };
+            MobPatches.ShowAgain = mob => mobMirror.ShowAgain(mob);
+            PausePatches.KeepRunning = () => welcomed && haveRemote && !BossIntro.Frozen && !GameAccess.IsLoadingRoom && GameAccess.MainCharacter() != null;
             // Compared with the room we are in right now (trackedRoom lags behind while a room loads).
             BossIntro.OtherPlayerHere = () => welcomed && haveRemote && Time.unscaledTime - remoteTime < RemoteStaleSeconds
                 && !string.IsNullOrEmpty(remote.RoomId) && remote.RoomId == GameAccess.CurrentRoomId();
             BossIntro.Connected = () => welcomed;
+            BossIntro.PartnerInThisArea = () => haveRemote && remote != null && !string.IsNullOrEmpty(remote.RoomId)
+                && PartnerMap.Area(remote.RoomId) == PartnerMap.Area(GameAccess.CurrentRoomId());
             Spectate.WeAreDead = () => weAreDead;
             Spectate.PartnerFighting = () => welcomed && !remoteDead && BossIntro.OtherPlayerHere();
             MobTargeting.PuppetHere = () => welcomed && !remoteDead && RemoteInMyRoom(Time.unscaledTime);

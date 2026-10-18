@@ -16,7 +16,7 @@ namespace RoseNet.Game
         internal static void OnMapEnabled(LevelMap m) { map = m; mapOpen = true; logged = false; }
         internal static void OnMapDisabled() { mapOpen = false; }
 
-        static string Area(string room)
+        internal static string Area(string room)
         {
             // "World_Biome_01_Streets_Poor_..." -> "World_Biome_01"
             if (string.IsNullOrEmpty(room)) return null;

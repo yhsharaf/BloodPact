@@ -15,6 +15,9 @@ namespace RoseNet.Game
     {
         internal static Func<bool> OtherPlayerHere = () => false;
         internal static Func<bool> Connected = () => false;
+        // Whether the other player is somewhere our teleport can reach (the same area, e.g. World_Biome_01).
+        internal static Func<bool> PartnerInThisArea = () => true;
+        static float calledAt, noticeUntil;
         internal static bool IsHost;
 
         internal static bool SendReady, SendSkip;   // picked up by the session
@@ -38,6 +41,8 @@ namespace RoseNet.Game
             }
             return false;
         }
+
+        internal static bool Frozen => frozen;
 
         static void Freeze()
         {
@@ -79,6 +84,15 @@ namespace RoseNet.Game
         {
             Banner = "Joining the boss fight...";
             askRoom = bossRoom;
+            calledAt = Time.unscaledTime;
+        }
+
+        // The call to a fight is over (arrived, gave up, or couldn't go): never leave its message up.
+        internal static void CallOver(string notice = null)
+        {
+            askRoom = null;
+            if (Banner != null && Banner.StartsWith("Joining")) Banner = null;
+            if (notice != null && stage == Stage.None) { Banner = notice; noticeUntil = Time.unscaledTime + 6f; }
         }
 
         internal static void Tick()
@@ -89,13 +103,15 @@ namespace RoseNet.Game
 
             // Called to a fight: clear our banner once we are there.
             if (stage == Stage.None && Banner != null && askRoom != null && room == askRoom && !loading) { Banner = null; askRoom = null; }
+            if (askRoom != null && now - calledAt > 40f) CallOver();
+            if (noticeUntil > 0f && now > noticeUntil) { noticeUntil = 0f; if (stage == Stage.None && askRoom == null) Banner = null; }
 
             // Just walked into a boss room on our own: stop and see whether there is a boss to fight.
             if (!loading && !string.IsNullOrEmpty(room) && room != lastRoom)
             {
                 lastRoom = room;
                 if (stage != Stage.None) End("left the room");
-                if (IsBossRoom(room) && room != declinedRoom && Connected() && !OtherPlayerHere())
+                if (IsBossRoom(room) && room != declinedRoom && Connected() && !OtherPlayerHere() && PartnerInThisArea())
                 {
                     stage = Stage.Checking;
                     stageUntil = now + 1.5f;
@@ -243,6 +259,21 @@ namespace RoseNet.Game
             Revive();
         }
 
+        // Dying hides the player HUD and shows the death screen; normally the respawn's level reload brings it
+        // back. Getting up in place skips that reload, so put the HUD back ourselves.
+        internal static void RestoreHud()
+        {
+            try { foreach (var c in Object.FindObjectsOfType<HUDDeathController>()) c.ResetHUDDeath(); }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not clear the death screen: {e.Message}"); }
+            try { Doozy.Runtime.UIManager.Containers.UIView.Hide(Doozy.Runtime.UIManager.UIViewId.GameplayHUD.DeathHUD, false); } catch { }
+            try
+            {
+                Doozy.Runtime.UIManager.Containers.UIView.Show(Doozy.Runtime.UIManager.UIViewId.GameplayHUD.HUDPlayer, false);
+                Doozy.Runtime.UIManager.Containers.UIView.Show(Doozy.Runtime.UIManager.UIViewId.GameplayHUD.CurrencyHUD, false);
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not show the HUD again: {e.Message}"); }
+        }
+
         static void Revive()
         {
             var me = GameAccess.MainCharacter();
@@ -264,6 +295,7 @@ namespace RoseNet.Game
                     }
                     foreach (var a in dying) actor.StopAction(me, a, null);
                 }
+                RestoreHud();
                 Plugin.Logger.LogInfo("[Session] The other player won the boss fight; we get up where we fell.");
             }
             catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not revive after the boss fight: {e.Message}"); }
@@ -285,7 +317,7 @@ namespace RoseNet.Game
         }
     }
 
-    // Testing aid ([Debug] BossLowHealthKey): F9 drops the living bosses in our room to 1 HP. A boss the other
+    // Testing aid ([Debug] BossLowHealthKey): F9 drops the living bosses in our room to half health, then 1 HP. A boss the other
     // game runs gets the damage through the normal hit path, so both worlds agree.
     internal static class BossCheat
     {
@@ -307,13 +339,15 @@ namespace RoseNet.Game
                     if (mob.GetComponent<BossComponent>() == null) continue;
                     var d = MobControl.DamageableOf(mob);
                     if (d == null || d.currentHealth <= 1) continue;
-                    if (MobControl.IsPossessed(mob)) MobControl.OutgoingHits.Add((kv.Key, d.currentHealth - 1));
-                    else { d.currentHealth = 1; BossHud.Refresh(mob, d); }
+                    // First press: half health (reaches a second phase); next press: 1 HP.
+                    int target = d.currentHealth > d.maxHealth * 0.55f ? Mathf.Max(1, d.maxHealth / 2) : 1;
+                    if (MobControl.IsPossessed(mob)) MobControl.OutgoingHits.Add((kv.Key, d.currentHealth - target));
+                    else { d.currentHealth = target; BossHud.Refresh(mob, d); }
                     n++;
                 }
                 catch { }
             }
-            Plugin.Logger.LogInfo($"[Session] Debug: {n} boss(es) dropped to 1 HP.");
+            Plugin.Logger.LogInfo($"[Session] Debug: {n} boss(es) dropped (half health first, then 1 HP).");
         }
     }
 
@@ -356,16 +390,20 @@ namespace RoseNet.Game
             foreach (var kv in MobRegistry.ById)
             {
                 var mob = kv.Value;
-                if (mob == null || !MobRegistry.InRoom(kv.Key, pendingRoom) || !MobRegistry.IsAlive(mob)) continue;
+                // Our copy may already show 0 health (our own last hit, or the owner's), with its death held
+                // back: it still needs the game's own death here, which ends the fight and drops the rewards.
+                if (mob == null || !MobRegistry.InRoom(kv.Key, pendingRoom) || MobControl.OwnerKilled.Contains(mob.Pointer)) continue;
                 try
                 {
-                    if (mob.GetComponent<BossComponent>() == null) continue;
+                    if (mob.destroyed || !mob.gameObject.activeInHierarchy || mob.GetComponent<BossComponent>() == null) continue;
                     var d = MobControl.DamageableOf(mob);
                     if (d == null) continue;
                     Applying = true;
                     MobControl.OwnerKilled.Add(mob.Pointer);
                     MobControl.AllowDeath = true;
                     MobControl.AllowStart = true;
+                    MobPatches.ShowAgain?.Invoke(mob);   // back where it is, drawn, so its death and drops happen there
+                    if (d.currentHealth <= 0) d.currentHealth = 1;
                     d.currentHealth = 0;
                     d.Die(mob, me, new DamageData());
                     n++;
@@ -431,6 +469,27 @@ namespace RoseNet.Game
         static bool Skip()
         {
             try { return BossIntro.AllowLocalSkip(); } catch { return true; }
+        }
+    }
+
+    // Online, the pause menu must not stop the world: whoever runs a room's monsters (a boss too) would freeze
+    // them for both players. The game pauses its entity world (EntityContext.Pause) as well as time.
+    internal static class PausePatches
+    {
+        internal static Func<bool> KeepRunning = () => false;
+        static int logs = 3;
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(EntityContext), nameof(EntityContext.Pause))]
+        static bool NoPauseOnline()
+        {
+            try
+            {
+                if (!KeepRunning()) return true;
+                if (logs-- > 0) Plugin.Logger.LogInfo("[Session] The game wanted to pause its world; online it keeps running.");
+                return false;
+            }
+            catch { return true; }
         }
     }
 }

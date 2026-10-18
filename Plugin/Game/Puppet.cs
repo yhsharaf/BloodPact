@@ -206,10 +206,21 @@ namespace RoseNet.Game
             Plugin.Logger.LogInfo($"[Session] Remote Rose bound: {bones}/{bonePaths.Length} bones, {renderers}/{rendererKeys.Length} visible parts matched.");
         }
 
+        ActorPlatform platformInfo;
+        bool platformLooked;
+
         public void Apply(PoseState s)
         {
             if (!Alive) return;
             entityRoot.SetPositionAndRotation(s.EntityPosition, s.EntityRotation);
+            // Which platform we stand on: left empty, so the game looks up the one under our position (the copied
+            // value would be wherever the real Rose stood when this stand-in was made).
+            try
+            {
+                if (!platformLooked) { platformLooked = true; platformInfo = entityRoot.GetComponent<ActorPlatform>(); }
+                if (platformInfo != null && platformInfo.currentPlatform != null) platformInfo.currentPlatform = null;
+            }
+            catch { }
             entityRoot.localScale = s.EntityScale;
             visualRoot.SetPositionAndRotation(s.RootPosition, s.RootRotation);
             int n = Math.Min(s.BoneCount, boneMap.Length);
@@ -465,6 +476,7 @@ namespace RoseNet.Game
         static readonly HashSet<string> KeptTypes = new HashSet<string>
         {
             "Entity", "FeedbackContainer", "FeedbackBindingsReference", "AnimationBindingComponent",
+            "ActorPlatform",   // monsters' "jump near the target's platform" attacks read it (Leon); data only
             "VFXBindingsComponent", "TransformBindings",   // effects find their particles and attach points here
             "ParticleSystem", "VisualEffect", "MeshFilter",
         };

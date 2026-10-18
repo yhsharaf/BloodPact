@@ -31,7 +31,7 @@ namespace RoseNet
     public class Plugin : BasePlugin
     {
         public const string Guid = "com.rosenet.tailscale";
-        public const string Version = "0.2.0";
+        public const string Version = "0.2.1";
 
         internal static ManualLogSource Logger;
         internal static UdpHost Host;
@@ -140,6 +140,8 @@ namespace RoseNet
                     harmony.PatchAll(typeof(Game.PartnerMapPatches));
                     harmony.PatchAll(typeof(Game.RestPatches));
                     harmony.PatchAll(typeof(Game.RestDiag));
+                    try { harmony.PatchAll(typeof(Game.PausePatches)); }
+                    catch (Exception e) { Log.LogWarning($"Online pause patch failed (the pause menu will stop the world): {e.Message}"); }
                     AddComponent<CoopSession>();
                     Log.LogInfo($"Online session: {settings.Role} over {settings.Transport}.");
                 }
