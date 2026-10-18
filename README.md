@@ -49,7 +49,8 @@ launch with Steam launch options:
 Over Steam the guest finds a hosting friend on their own. Over UDP the guest needs the host's address, and the
 host's firewall must allow inbound UDP on the session port.
 
-The guest's own save file is never overwritten while playing as a guest.
+Each player keeps their own world and save file. (When two copies of the game run on one PC, for testing,
+they share one save folder, so the guest copy doesn't write its save there.)
 
 ### Display settings
 

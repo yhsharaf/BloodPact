@@ -80,16 +80,34 @@ namespace RoseNet.Game
             GameAccess.RoomSystem = __instance;
         }
 
-        // The guest plays inside the host's world: its own save file must never be overwritten by that.
-        // Only the file write is skipped; the game's save logic still runs (resting resets monsters through it).
+        // Each player keeps their own world and save. The one exception: two copies of the game on one PC (how
+        // we test) share one save folder, so there the guest's copy doesn't write, or it would overwrite the
+        // host's file. Only the file write is skipped; the game's save logic still runs.
         [HarmonyPrefix]
         [HarmonyPatch(typeof(MotherBase.GameServices.StandaloneAccount), nameof(MotherBase.GameServices.StandaloneAccount.WriteSave))]
         static bool BlockGuestSaveFile(string __0, ref bool __result)
         {
             if (!Session.CoopSession.IsGuest || (__0 != null && __0.IndexOf("PLAYERPREFS", StringComparison.OrdinalIgnoreCase) >= 0)) return true;
-            Plugin.Logger.LogInfo($"[Session] Guest: did not write '{__0}' (only the host's world is saved).");
+            if (!AnotherCopyRunning()) return true;
+            Plugin.Logger.LogInfo($"[Session] Guest: did not write '{__0}' (another copy of the game on this PC uses the same save folder).");
             __result = true;
             return false;
+        }
+
+        static float nextCopyCheck = -1f;
+        static bool anotherCopy;
+
+        static bool AnotherCopyRunning()
+        {
+            if (Time.unscaledTime < nextCopyCheck) return anotherCopy;
+            nextCopyCheck = Time.unscaledTime + 10f;
+            try
+            {
+                var me = System.Diagnostics.Process.GetCurrentProcess();
+                anotherCopy = System.Diagnostics.Process.GetProcessesByName(me.ProcessName).Length > 1;
+            }
+            catch { anotherCopy = true; }   // unsure: keep the host's file safe
+            return anotherCopy;
         }
     }
 }
