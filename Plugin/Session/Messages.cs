@@ -28,6 +28,11 @@ namespace RoseNet.Session
         MobHit = 18,    // non-owner -> owner: damage the sender's player dealt to the owner's monsters
         MobPoses = 19,  // ~12/s from the room owner: bone poses of the monsters, for exact visuals
         WorldState = 20, // a door, lever, crank... changed in the sender's world: save key, kind, new state
+        CharacterStep = 22, // the sender's game got further with a character (e.g. learned a boss's name)
+        BossIntroReady = 23, // our boss intro began after being called: the other player's held intro may go on
+        IntroSkip = 24,  // host -> guest: skip the current intro dialogue line
+        PlayerDied = 25, // the sender's Rose died (bool: true = died, false = alive again)
+        BossStart = 21,  // the sender set off a boss encounter: room, trigger key, where they stand (pull the partner in)
     }
 
     internal sealed class PoseState

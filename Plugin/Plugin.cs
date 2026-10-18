@@ -117,6 +117,8 @@ namespace RoseNet
                     harmony.PatchAll(typeof(Game.ProjectilePatches));
                     harmony.PatchAll(typeof(Game.MobPatches));
                     harmony.PatchAll(typeof(Game.MobCulling));
+                    harmony.PatchAll(typeof(Game.BossPatches));
+                    harmony.PatchAll(typeof(Game.BossIntroPatches));
                     harmony.PatchAll(typeof(Game.RestPatches));
                     harmony.PatchAll(typeof(Game.RestDiag));
                     AddComponent<CoopSession>();

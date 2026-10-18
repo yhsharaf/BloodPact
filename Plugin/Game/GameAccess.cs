@@ -47,9 +47,26 @@ namespace RoseNet.Game
             return animator != null ? animator.transform : character.transform;
         }
 
+        // Moves the character the way the game's own teleporters do (GPE_Teleporter.TeleportOnPoint also
+        // updates the character's movement state; setting the transform alone gets snapped back), then lets
+        // the room manager load whatever room that lands in.
         public static void Teleport(Entity character, Vector3 position)
         {
-            character.transform.position = position;
+            var go = new GameObject("Blood Pact teleport point");
+            try
+            {
+                go.transform.position = position;
+                var tp = go.AddComponent<GPE_Teleporter>();
+                tp.TeleportOnPoint(character);
+            }
+            catch
+            {
+                character.transform.position = position;
+            }
+            finally
+            {
+                UnityEngine.Object.Destroy(go);
+            }
             RoomManager.RoomManagerSystem.ForceTriggerRoomChange = true;
         }
     }

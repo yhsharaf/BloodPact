@@ -32,7 +32,7 @@ namespace RoseNet.Session
     {
         public CoopSession(IntPtr ptr) : base(ptr) { }
 
-        public const ushort ProtocolVersion = 18;
+        public const ushort ProtocolVersion = 24;
         const float HelloInterval = 1f, SkeletonRequestInterval = 1f, RemoteStaleSeconds = 2f;
         const float FollowDelay = 1f, TeleportCooldown = 3f, PingInterval = 1f;
 
@@ -64,6 +64,8 @@ namespace RoseNet.Session
 
         void Update()
         {
+            // A boss intro held for the other player must always let go, connected or not.
+            try { if (!welcomed) BossIntro.Forget(); BossIntro.Tick(); } catch { }
             try { Tick(); }
             catch (Exception e)
             {
@@ -136,6 +138,41 @@ namespace RoseNet.Session
             UpdateMonsters(now);
             SendRest();
             SendWorld();
+            SendBoss();
+            WatchOwnDeath();
+        }
+
+        // ---- deaths: a dead player's stand-in is no target, and the survivor takes over the room ----
+        bool weAreDead, remoteDead;
+
+        void WatchOwnDeath()
+        {
+            var me = GameAccess.MainCharacter();
+            if (me == null) return;
+            bool dead;
+            try { var d = MobControl.DamageableOf(me); dead = d != null && !d.isAlive; } catch { return; }
+            if (dead == weAreDead) return;
+            weAreDead = dead;
+            var w = writer.Begin(MsgType.PlayerDied);
+            w.Write(dead);
+            transport.Send(writer.Buffer, writer.Length, true);
+            Plugin.Logger.LogInfo(dead ? "[Session] Our Rose died; telling the other player." : "[Session] Our Rose is back.");
+        }
+
+        void OnRemoteDeath(bool dead)
+        {
+            remoteDead = dead;
+            if (!dead) return;
+            Plugin.Logger.LogInfo("[Session] The other player's Rose died.");
+            // They ran this room's monsters (a boss fight too): we carry on with them, as they are now.
+            if (!iOwnRoom && RemoteInMyRoom(Time.unscaledTime))
+            {
+                iOwnRoom = true;
+                ownerAwaySince = -1;
+                describedMobs.Clear();
+                mobMirror.Release();
+                Plugin.Logger.LogInfo("[Session] We run this room's monsters now (the other player fell).");
+            }
         }
 
         void SendRest()
@@ -185,12 +222,51 @@ namespace RoseNet.Session
             list.Clear();
         }
 
+        // Boss encounters we set off pull the other player in; theirs pull us in.
+        void SendBoss()
+        {
+            BossSync.Tick();
+            foreach (var s in BossSync.Outgoing)
+            {
+                var w = writer.Begin(MsgType.BossStart);
+                w.Write(s.Room ?? "");
+                w.Write(s.BossRoom ?? "");
+                w.Write(s.Trigger ?? "");
+                w.Write(s.Fight ?? "");
+                w.Write(s.BossId);
+                w.Write(s.Position.x); w.Write(s.Position.y); w.Write(s.Position.z);
+                transport.Send(writer.Buffer, writer.Length, true);
+            }
+            BossSync.Outgoing.Clear();
+            foreach (var c in CharacterSync.Outgoing)
+            {
+                var w = writer.Begin(MsgType.CharacterStep);
+                w.Write(c.Character ?? "");
+                w.Write(c.Value);
+                transport.Send(writer.Buffer, writer.Length, true);
+            }
+            CharacterSync.Outgoing.Clear();
+            BossIntro.IsHost = Settings.Role == Role.Host;
+            if (BossIntro.SendReady)
+            {
+                BossIntro.SendReady = false;
+                var w = writer.Begin(MsgType.BossIntroReady);
+                transport.Send(writer.Buffer, writer.Length, true);
+            }
+            if (BossIntro.SendSkip)
+            {
+                BossIntro.SendSkip = false;
+                var w = writer.Begin(MsgType.IntroSkip);
+                transport.Send(writer.Buffer, writer.Length, true);
+            }
+        }
+
         // ---- monsters: whoever entered the room first runs them; the other game mirrors them ----
 
         const float MobSendInterval = 0.05f, OwnerGoneSeconds = 1.5f;
         string trackedRoom;
         bool iOwnRoom = true;
-        float nextMobSend, nextPoseSend, ownerAwaySince = -1, roomEnteredAt;
+        float nextMobSend, nextPoseSend, ownerAwaySince = -1, roomEnteredAt, lastStreamAt = -100f;
         readonly MobMirror mobMirror = new MobMirror();
         readonly System.Collections.Generic.List<MobState> mobStates = new System.Collections.Generic.List<MobState>();
         readonly System.Collections.Generic.List<(uint id, string name)> mobNames = new System.Collections.Generic.List<(uint, string)>();
@@ -237,6 +313,19 @@ namespace RoseNet.Session
                     describedMobs.Clear();
                     mobMirror.Release();
                     Plugin.Logger.LogInfo("[Session] The other player left the room; we run its monsters now.");
+                }
+                // We came in at the same moment and each took the other for the owner: nobody runs the room.
+                // If no monsters arrive from them, claim it (the host first, so both don't).
+                float claimAfter = Settings.Role == Role.Host ? 2f : 4f;
+                if (!iOwnRoom && together && now - roomEnteredAt > claimAfter && now - lastStreamAt > claimAfter)
+                {
+                    iOwnRoom = true;
+                    describedMobs.Clear();
+                    mobMirror.Release();
+                    var w = writer.Begin(MsgType.RoomClaim);
+                    w.Write(trackedRoom);
+                    transport.Send(writer.Buffer, writer.Length, true);
+                    Plugin.Logger.LogInfo("[Session] Nobody was running this room's monsters; we run them now.");
                 }
             }
 
@@ -350,6 +439,7 @@ namespace RoseNet.Session
                 s.Target = r.ReadByte();
                 mobStates.Add(s);
             }
+            if (room == trackedRoom) lastStreamAt = Time.unscaledTime;
             if (room == trackedRoom && !iOwnRoom) mobMirror.Receive(mobStates);
         }
 
@@ -452,6 +542,14 @@ namespace RoseNet.Session
 
                 if (Settings.ShowStatus)
                     GUI.Label(new Rect(10, 4, 700, 22), StatusText(), statusStyle);
+
+                var banner = BossIntro.Banner;
+                if (!string.IsNullOrEmpty(banner))
+                {
+                    var r = new Rect(0, Screen.height * 0.18f, Screen.width, 30);
+                    GUI.Label(new Rect(r.x + 2, r.y + 2, r.width, r.height), banner, nameShadow);
+                    GUI.Label(r, banner, nameStyle);
+                }
 
                 if (Settings.ShowNames && puppet != null && puppet.TryGetHeadPosition(out var head))
                 {
@@ -817,6 +915,21 @@ namespace RoseNet.Session
                     if (hitLogs-- > 0) Plugin.Logger.LogInfo($"[Session] {remoteName} hit {n} of our monsters.");
                     break;
                 }
+                case MsgType.CharacterStep when welcomed:
+                    CharacterSync.Apply(new CharacterSync.Step { Character = r.ReadString(), Value = r.ReadInt32() });
+                    break;
+                case MsgType.BossIntroReady when welcomed:
+                    BossIntro.OnOtherReady();
+                    break;
+                case MsgType.IntroSkip when welcomed:
+                    BossIntro.OnOtherSkipped();
+                    break;
+                case MsgType.PlayerDied when welcomed:
+                    OnRemoteDeath(r.ReadBoolean());
+                    break;
+                case MsgType.BossStart when welcomed:
+                    BossSync.OnRemoteStart(new BossSync.Start { Room = r.ReadString(), BossRoom = r.ReadString(), Trigger = r.ReadString(), Fight = r.ReadString(), BossId = r.ReadUInt32(), Position = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()) });
+                    break;
                 case MsgType.WorldState when welcomed:
                     WorldSync.Apply(new WorldSync.Change { Key = r.ReadString(), Kind = r.ReadString(), State = r.ReadString() });
                     break;
@@ -1021,6 +1134,12 @@ namespace RoseNet.Session
         {
             MobPatches.AfterGameLateUpdate = () => { if (welcomed && !iOwnRoom) mobMirror.LateApply(trackedRoom); };
             MobPatches.AfterMobAnimated = mob => { if (welcomed && !iOwnRoom) mobMirror.AfterAnimated(mob); };
+            // Compared with the room we are in right now (trackedRoom lags behind while a room loads).
+            BossIntro.OtherPlayerHere = () => welcomed && haveRemote && Time.unscaledTime - remoteTime < RemoteStaleSeconds
+                && !string.IsNullOrEmpty(remote.RoomId) && remote.RoomId == GameAccess.CurrentRoomId();
+            BossIntro.Connected = () => welcomed;
+            MobTargeting.PuppetHere = () => welcomed && !remoteDead && RemoteInMyRoom(Time.unscaledTime);
+            BossIntro.IsHost = Settings != null && Settings.Role == Role.Host;
         }
 
         void OnDestroy()

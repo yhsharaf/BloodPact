@@ -491,12 +491,23 @@ namespace RoseNet.Game
             return true;
         }
 
+        // Whether the other player is in our room and alive (set by the session).
+        internal static Func<bool> PuppetHere = () => true;
+
         public static bool TryPickCloser(Entity mob, AIStateComponent ai, bool acquiring)
         {
             var puppet = Puppet.Current;
             var me = GameAccess.MainCharacter();
-            if (puppet == null || MobControl.IsPossessed(mob) || !puppet.gameObject.activeInHierarchy) return false;
+            if (puppet == null || MobControl.IsPossessed(mob)) return false;
             var current = ai.target;
+            if (!PuppetHere() || !puppet.gameObject.activeInHierarchy)
+            {
+                // The other player left (or died): their stand-in is somewhere else now; never chase it.
+                if (current == null || current.Pointer != puppet.Pointer || me == null) return false;
+                ai.target = me;
+                if (logs-- > 0) Plugin.Logger.LogInfo($"[Session] '{MobRegistry.PrefabName(mob)}' lost the other player; back to our Rose.");
+                return true;
+            }
             // Only choose between the two players; never steal a target the game set for other reasons.
             if (current != null && current.Pointer != puppet.Pointer && (me == null || current.Pointer != me.Pointer)) return false;
 
@@ -563,6 +574,7 @@ namespace RoseNet.Game
                 // it copies the record, so it must not be empty).
                 int hp = d.currentHealth - damage;
                 d.currentHealth = Math.Max(0, hp);
+                BossHud.Refresh(mob, d);
                 if (hp <= 0 && d.isAlive) d.Die(mob, attacker, new DamageData());
             }
             catch (Exception e)
@@ -668,6 +680,8 @@ namespace RoseNet.Game
             {
                 var mob = kv.Value;
                 if (mob == null || !MobRegistry.InRoom(kv.Key, roomId)) continue;
+                // A boss plays its own intro here first: that starts our fight (arena camera, walls, HUD).
+                if (BossSync.AwaitingLocalStart(mob)) { MobControl.Possessed.Remove(mob.Pointer); continue; }
                 MobControl.Possessed.Add(mob.Pointer);
                 idOf[mob.Pointer] = kv.Key;
 
@@ -732,7 +746,7 @@ namespace RoseNet.Game
             if (d == null || d.currentHealth == s.Health) return;
             if (MobControl.LastLocalHit.TryGetValue(mob.Pointer, out var hitAt) && Time.unscaledTime - hitAt < 0.6f && s.Health > d.currentHealth) return;
             if (healthSyncBroken) return;
-            try { d.currentHealth = Math.Max(1, s.Health); }
+            try { d.currentHealth = Math.Max(1, s.Health); BossHud.Refresh(mob, d); }
             catch (Exception e)
             {
                 healthSyncBroken = true; // don't try (and fail) every frame
@@ -1086,6 +1100,32 @@ namespace RoseNet.Game
         }
     }
 
+    // The boss health bar only redraws on the game's health events; health we set from the other player's
+    // hits doesn't send one, so tell the bar to re-read the boss's health.
+    internal static class BossHud
+    {
+        static HUDBossManager hud;
+        static bool broken;
+
+        public static void Refresh(Entity mob, Damageable d)
+        {
+            if (broken || mob == null || d == null || mob.GetComponent<BossComponent>() == null) return;
+            try
+            {
+                if (hud == null) hud = UnityEngine.Object.FindObjectOfType<HUDBossManager>();
+                var bar = hud != null ? hud.bossHealthController : null;
+                if (bar == null) return;
+                var ev = new EntityInitHealthEvent { isPlayer = false, e = mob, damageable = d };
+                bar.ProcessInitHealthEvent(ev);
+            }
+            catch (Exception e)
+            {
+                broken = true;
+                Plugin.Logger.LogWarning($"[Session] Could not refresh the boss health bar: {e.Message}");
+            }
+        }
+    }
+
     internal static class MobCulling
     {
         static readonly Dictionary<IntPtr, (AnimatedActor actor, AnimatedActor.CullingMode mode)> changed =
@@ -1385,9 +1425,13 @@ namespace RoseNet.Game
         {
             try
             {
-                if (__0 == null || !MobTargeting.Due(__0)) return;
+                if (__0 == null) return;
                 var ai = __0.GetComponent<AIStateComponent>();
-                if (ai != null && ai.target != null) MobTargeting.TryPickCloser(__0, ai, acquiring: false);
+                if (ai == null || ai.target == null) return;
+                // Dropping a stand-in that is no longer here can't wait for the next once-a-second check.
+                bool stale = Puppet.Current != null && ai.target.Pointer == Puppet.Current.Pointer && !MobTargeting.PuppetHere();
+                if (!stale && !MobTargeting.Due(__0)) return;
+                MobTargeting.TryPickCloser(__0, ai, acquiring: false);
             }
             catch { }
         }
@@ -1397,14 +1441,14 @@ namespace RoseNet.Game
         [HarmonyPatch(typeof(BasicBrain), nameof(BasicBrain.CanBeTargeted))]
         static void PuppetIsTargetable(Entity __1, ref bool __result)
         {
-            if (!__result && __1 != null && Puppet.Entities.Contains(__1.Pointer)) __result = true;
+            if (!__result && __1 != null && Puppet.Entities.Contains(__1.Pointer) && MobTargeting.PuppetHere()) __result = true;
         }
 
         [HarmonyPostfix]
         [HarmonyPatch(typeof(MobPackComponent), nameof(MobPackComponent.CanTargetEntity))]
         static void PackMayTargetPuppet(Entity __0, ref bool __result)
         {
-            if (!__result && __0 != null && Puppet.Entities.Contains(__0.Pointer)) __result = true;
+            if (!__result && __0 != null && Puppet.Entities.Contains(__0.Pointer) && MobTargeting.PuppetHere()) __result = true;
         }
     }
 }
