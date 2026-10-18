@@ -23,6 +23,7 @@ namespace RoseNet.Session
         public Color RemoteTint = Color.white;
         public bool ShowNames = true;
         public bool ShowStatus = true;
+        public bool BossLowHealthKey;   // testing: F9 drops the bosses in our room to 1 HP
     }
 
     // Milestone 2: each PC plays its own Rose; both stream their Rose (room, position, bone pose and the
@@ -32,7 +33,7 @@ namespace RoseNet.Session
     {
         public CoopSession(IntPtr ptr) : base(ptr) { }
 
-        public const ushort ProtocolVersion = 24;
+        public const ushort ProtocolVersion = 25;
         const float HelloInterval = 1f, SkeletonRequestInterval = 1f, RemoteStaleSeconds = 2f;
         const float FollowDelay = 1f, TeleportCooldown = 3f, PingInterval = 1f;
 
@@ -65,7 +66,7 @@ namespace RoseNet.Session
         void Update()
         {
             // A boss intro held for the other player must always let go, connected or not.
-            try { if (!welcomed) BossIntro.Forget(); BossIntro.Tick(); Spectate.Tick(); } catch { }
+            try { if (!welcomed) BossIntro.Forget(); BossIntro.Tick(); Spectate.Tick(); Victory.Tick(); BossCheat.Tick(Settings != null && Settings.BossLowHealthKey); } catch { }
             try { Tick(); }
             catch (Exception e)
             {
@@ -246,6 +247,13 @@ namespace RoseNet.Session
                 transport.Send(writer.Buffer, writer.Length, true);
             }
             CharacterSync.Outgoing.Clear();
+            foreach (var room in Victory.Outgoing)
+            {
+                var w = writer.Begin(MsgType.BossDefeated);
+                w.Write(room ?? "");
+                transport.Send(writer.Buffer, writer.Length, true);
+            }
+            Victory.Outgoing.Clear();
             BossIntro.IsHost = Settings.Role == Role.Host;
             if (BossIntro.SendReady)
             {
@@ -926,6 +934,9 @@ namespace RoseNet.Session
                     break;
                 case MsgType.PlayerDied when welcomed:
                     OnRemoteDeath(r.ReadBoolean());
+                    break;
+                case MsgType.BossDefeated when welcomed:
+                    Victory.OnRemote(r.ReadString());
                     break;
                 case MsgType.BossStart when welcomed:
                     BossSync.OnRemoteStart(new BossSync.Start { Room = r.ReadString(), BossRoom = r.ReadString(), Trigger = r.ReadString(), Fight = r.ReadString(), BossId = r.ReadUInt32(), Position = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()) });

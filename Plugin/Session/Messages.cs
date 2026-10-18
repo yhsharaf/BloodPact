@@ -32,6 +32,7 @@ namespace RoseNet.Session
         BossIntroReady = 23, // our boss intro began after being called: the other player's held intro may go on
         IntroSkip = 24,  // host -> guest: skip the current intro dialogue line
         PlayerDied = 25, // the sender's Rose died (bool: true = died, false = alive again)
+        BossDefeated = 26, // the boss in the sender's room died (room id)
         BossStart = 21,  // the sender set off a boss encounter: room, trigger key, where they stand (pull the partner in)
     }
 

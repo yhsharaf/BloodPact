@@ -58,6 +58,8 @@ namespace RoseNet
 
             LogInput = Config.Bind("Debug", "LogInput", false,
                 "Log every guest button change and what the virtual gamepad reports back. For bug reports.");
+            var bossCheat = Config.Bind("Debug", "BossLowHealthKey", false,
+                "Testing only: F9 drops every living boss in your room to 1 HP (in both games). Leave off for normal play.");
             var probe = Config.Bind("Probe", "Enabled", false,
                 "Write every room entered and every enemy spawned/killed to BepInEx\\RoseNetProbe\\. Used to compare two PCs before online sync.");
 
@@ -105,6 +107,7 @@ namespace RoseNet
                 RemoteTint = ParseColor(tint.Value),
                 ShowNames = showNames.Value,
                 ShowStatus = showStatus.Value,
+                BossLowHealthKey = bossCheat.Value,
             };
 
             if (settings.Role != Role.Off)

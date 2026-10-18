@@ -156,8 +156,11 @@ namespace RoseNet.Game
         internal static void OnBossAction(Entity boss, ActionData action) { }
 
         // The host skipped a line: do the same here.
+        static float lastRemoteSkipAt = -100f;
+
         internal static void OnOtherSkipped()
         {
+            lastRemoteSkipAt = Time.unscaledTime;
             if (!shared) return;
             try
             {
@@ -165,18 +168,27 @@ namespace RoseNet.Game
                 {
                     if (r == null || !r._isActive) continue;
                     remoteSkip = true;
-                    r.HandleUserSkipped(default);
+                    r.HandleUserSkipped(new UnityEngine.InputSystem.InputAction.CallbackContext());
                 }
             }
-            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not skip the intro line: {e.Message}"); }
+            catch (Exception e)
+            {
+                // Can't skip for the guest: let them skip their own lines from now on, so nobody gets stuck.
+                if (forwardWorks) Plugin.Logger.LogWarning($"[Session] Could not skip the intro line for the host ({e.Message}); the guest skips their own lines.");
+                forwardWorks = false;
+            }
             finally { remoteSkip = false; }
         }
 
-        // Our player pressed skip. False = ignore it (the host skips for both).
+        static bool forwardWorks = true;
+
+        // Our player pressed skip. False = ignore it (the host skips for both, as long as that works).
         internal static bool AllowLocalSkip()
         {
             if (!shared || remoteSkip) return true;
-            if (!IsHost) return false;
+            // The guest waits for the host's skips only while the host is actually skipping (the host may have
+            // no dialogue at all, e.g. having seen it before) and forwarding works.
+            if (!IsHost) return !forwardWorks || Time.unscaledTime - lastRemoteSkipAt > 15f;
             SendSkip = true;
             return true;
         }
@@ -222,9 +234,46 @@ namespace RoseNet.Game
             return false;
         }
 
+        // Our partner won while we were down: no trip back to the save room; we get up where we fell.
+        internal static void OnVictory()
+        {
+            if (held == null) return;
+            held = null;
+            if (BossIntro.Banner != null && BossIntro.Banner.StartsWith("You fell")) BossIntro.Banner = null;
+            Revive();
+        }
+
+        static void Revive()
+        {
+            var me = GameAccess.MainCharacter();
+            if (me == null) return;
+            try
+            {
+                var d = MobControl.DamageableOf(me);
+                if (d != null) d.ReviveAndReset();
+                var actor = me.GetComponent<Actor>();
+                var active = actor != null ? actor.activeActions : null;
+                if (active != null)
+                {
+                    var dying = new System.Collections.Generic.List<ActionInstance>();
+                    for (int i = 0; i < active.Count; i++)
+                    {
+                        var a = active[i];
+                        string n = a != null && a.data != null ? a.data.name : null;
+                        if (n != null && n.IndexOf("Death", StringComparison.OrdinalIgnoreCase) >= 0) dying.Add(a);
+                    }
+                    foreach (var a in dying) actor.StopAction(me, a, null);
+                }
+                Plugin.Logger.LogInfo("[Session] The other player won the boss fight; we get up where we fell.");
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not revive after the boss fight: {e.Message}"); }
+        }
+
         internal static void Tick()
         {
             if (held == null) return;
+            // The boss is gone while our partner is still here and standing: they won.
+            if (WeAreDead() && PartnerFighting() && !BossAliveHere()) { OnVictory(); return; }
             if (ShouldWatch() && Time.unscaledTime - since < 300f) return;
             var go = held;
             held = null;
@@ -236,8 +285,108 @@ namespace RoseNet.Game
         }
     }
 
+    // Testing aid ([Debug] BossLowHealthKey): F9 drops the living bosses in our room to 1 HP. A boss the other
+    // game runs gets the damage through the normal hit path, so both worlds agree.
+    internal static class BossCheat
+    {
+        public static void Tick(bool enabled)
+        {
+            if (!enabled) return;
+            bool pressed;
+            try { var kb = UnityEngine.InputSystem.Keyboard.current; pressed = kb != null && kb.f9Key.wasPressedThisFrame; }
+            catch { return; }
+            if (!pressed) return;
+            string room = GameAccess.CurrentRoomId();
+            int n = 0;
+            foreach (var kv in MobRegistry.ById)
+            {
+                var mob = kv.Value;
+                if (mob == null || !MobRegistry.InRoom(kv.Key, room) || !MobRegistry.IsAlive(mob)) continue;
+                try
+                {
+                    if (mob.GetComponent<BossComponent>() == null) continue;
+                    var d = MobControl.DamageableOf(mob);
+                    if (d == null || d.currentHealth <= 1) continue;
+                    if (MobControl.IsPossessed(mob)) MobControl.OutgoingHits.Add((kv.Key, d.currentHealth - 1));
+                    else { d.currentHealth = 1; BossHud.Refresh(mob, d); }
+                    n++;
+                }
+                catch { }
+            }
+            Plugin.Logger.LogInfo($"[Session] Debug: {n} boss(es) dropped to 1 HP.");
+        }
+    }
+
+    // Shared victory: a boss that dies in the game running it is reported; the other game gets its player
+    // back up if they were down, then plays its own copy's death, so walls, defeat and rewards happen there too.
+    internal static class Victory
+    {
+        internal static readonly System.Collections.Generic.List<string> Outgoing = new System.Collections.Generic.List<string>();
+        internal static bool Applying;
+        static string lastRoom, pendingRoom;
+        static float lastAt, pendingAt;
+
+        internal static void OnLocalBossDied(Entity boss)
+        {
+            if (Applying || boss == null || MobControl.IsPossessed(boss)) return;
+            try { if (boss.GetComponent<BossComponent>() == null) return; } catch { return; }
+            string room = GameAccess.CurrentRoomId();
+            if (room == lastRoom && Time.unscaledTime - lastAt < 30f) return;
+            lastRoom = room; lastAt = Time.unscaledTime;
+            Outgoing.Add(room);
+            Plugin.Logger.LogInfo($"[Session] Boss defeated here ({boss.name}); telling the other player.");
+        }
+
+        internal static void OnRemote(string room)
+        {
+            Plugin.Logger.LogInfo($"[Session] The other player defeated the boss in {room}.");
+            pendingRoom = room;
+            pendingAt = Time.unscaledTime;
+            Spectate.OnVictory();
+        }
+
+        internal static void Tick()
+        {
+            if (pendingRoom == null) return;
+            float now = Time.unscaledTime;
+            if (GameAccess.CurrentRoomId() != pendingRoom) { if (now - pendingAt > 10f) pendingRoom = null; return; }
+            if (now - pendingAt < 0.8f) return;   // let a revive settle first
+            var me = GameAccess.MainCharacter();
+            int n = 0;
+            foreach (var kv in MobRegistry.ById)
+            {
+                var mob = kv.Value;
+                if (mob == null || !MobRegistry.InRoom(kv.Key, pendingRoom) || !MobRegistry.IsAlive(mob)) continue;
+                try
+                {
+                    if (mob.GetComponent<BossComponent>() == null) continue;
+                    var d = MobControl.DamageableOf(mob);
+                    if (d == null) continue;
+                    Applying = true;
+                    MobControl.OwnerKilled.Add(mob.Pointer);
+                    MobControl.AllowDeath = true;
+                    MobControl.AllowStart = true;
+                    d.currentHealth = 0;
+                    d.Die(mob, me, new DamageData());
+                    n++;
+                }
+                catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not finish our copy of the boss: {e.Message}"); }
+                finally { Applying = false; MobControl.AllowDeath = false; MobControl.AllowStart = false; }
+            }
+            if (n > 0) Plugin.Logger.LogInfo($"[Session] Our copy of the boss falls too ({n}).");
+            pendingRoom = null;
+        }
+    }
+
     internal static class SpectatePatches
     {
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(Damageable), nameof(Damageable.Die))]
+        static void SomethingDied(Entity __0)
+        {
+            try { Victory.OnLocalBossDied(__0); } catch { }
+        }
+
         [HarmonyPrefix]
         [HarmonyPatch(typeof(MotherBase.ApplicationFlowManager.ApplicationFlowManager), nameof(MotherBase.ApplicationFlowManager.ApplicationFlowManager.ReloadCurrentState))]
         static bool Reload(MotherBase.ApplicationFlowManager.ApplicationFlowManager __instance)
