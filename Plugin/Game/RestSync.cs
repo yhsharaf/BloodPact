@@ -25,13 +25,16 @@ namespace RoseNet.Game
         static readonly float[] CheckAfter = { 2f, 5f, 10f };
         internal static readonly List<Change> Outgoing = new List<Change>();
 
-        static Il2CppSystem.Collections.Generic.Dictionary<string, string> States()
+        internal static Il2CppSystem.Collections.Generic.Dictionary<string, string> States()
         {
             try { return SingletonScriptableObject<SaveLogic>.Get()?.RuntimeWorldSave?.savableEntityStates?.m_dict; }
             catch { return null; }
         }
 
         internal static bool FirstBatchPending;   // the first message of a rest also resets loaded rooms
+
+        // A rest (ours) is being processed: world objects change in bulk, which the rest sync covers.
+        internal static bool Resting => startedAt >= 0 && Time.unscaledTime - startedAt < 12f;
 
         // Our player started resting.
         public static void OnLocalRest()

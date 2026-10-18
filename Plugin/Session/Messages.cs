@@ -27,6 +27,7 @@ namespace RoseNet.Session
         RestSync = 17,  // the sender rested at a mirror: world states the rest changed (shared respawn)
         MobHit = 18,    // non-owner -> owner: damage the sender's player dealt to the owner's monsters
         MobPoses = 19,  // ~12/s from the room owner: bone poses of the monsters, for exact visuals
+        WorldState = 20, // a door, lever, crank... changed in the sender's world: save key, kind, new state
     }
 
     internal sealed class PoseState

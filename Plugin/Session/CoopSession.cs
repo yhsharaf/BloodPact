@@ -32,7 +32,7 @@ namespace RoseNet.Session
     {
         public CoopSession(IntPtr ptr) : base(ptr) { }
 
-        public const ushort ProtocolVersion = 17;
+        public const ushort ProtocolVersion = 18;
         const float HelloInterval = 1f, SkeletonRequestInterval = 1f, RemoteStaleSeconds = 2f;
         const float FollowDelay = 1f, TeleportCooldown = 3f, PingInterval = 1f;
 
@@ -135,6 +135,7 @@ namespace RoseNet.Session
             if (Settings.FollowHost && Settings.Role == Role.Guest && character != null) FollowHost(character, now);
             UpdateMonsters(now);
             SendRest();
+            SendWorld();
         }
 
         void SendRest()
@@ -165,6 +166,23 @@ namespace RoseNet.Session
                 i += n;
             } while (i < changes.Count);
             changes.Clear();
+        }
+
+        // Doors, levers, cranks... that changed in our world go to the other player.
+        void SendWorld()
+        {
+            WorldSync.Tick();
+            var list = WorldSync.Outgoing;
+            if (list.Count == 0) return;
+            foreach (var c in list)
+            {
+                var w = writer.Begin(MsgType.WorldState);
+                w.Write(c.Key ?? "");
+                w.Write(c.Kind ?? "");
+                w.Write(c.State ?? "");
+                transport.Send(writer.Buffer, writer.Length, true);
+            }
+            list.Clear();
         }
 
         // ---- monsters: whoever entered the room first runs them; the other game mirrors them ----
@@ -799,6 +817,9 @@ namespace RoseNet.Session
                     if (hitLogs-- > 0) Plugin.Logger.LogInfo($"[Session] {remoteName} hit {n} of our monsters.");
                     break;
                 }
+                case MsgType.WorldState when welcomed:
+                    WorldSync.Apply(new WorldSync.Change { Key = r.ReadString(), Kind = r.ReadString(), State = r.ReadString() });
+                    break;
                 case MsgType.RestSync when welcomed:
                 {
                     bool first = r.ReadBoolean();
