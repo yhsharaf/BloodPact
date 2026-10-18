@@ -123,6 +123,7 @@ namespace RoseNet
                     harmony.PatchAll(typeof(Game.BossPatches));
                     harmony.PatchAll(typeof(Game.BossIntroPatches));
                     harmony.PatchAll(typeof(Game.SpectatePatches));
+                    harmony.PatchAll(typeof(Game.PartnerMapPatches));
                     harmony.PatchAll(typeof(Game.RestPatches));
                     harmony.PatchAll(typeof(Game.RestDiag));
                     AddComponent<CoopSession>();

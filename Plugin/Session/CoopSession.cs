@@ -551,6 +551,14 @@ namespace RoseNet.Session
                 if (Settings.ShowStatus)
                     GUI.Label(new Rect(10, 4, 700, 22), StatusText(), statusStyle);
 
+                if (welcomed)
+                {
+                    Vector3? partnerHead = null;
+                    if (puppet != null && puppet.TryGetHeadPosition(out var h)) partnerHead = h;
+                    var mark = Settings.RemoteTint == Color.white ? new Color(0.75f, 0.88f, 1f) : Settings.RemoteTint;
+                    PartnerMap.Draw(haveRemote && remote != null, remote != null ? remote.EntityPosition : Vector3.zero, remote?.RoomId, remoteName, mark, partnerHead);
+                }
+
                 var banner = BossIntro.Banner;
                 if (!string.IsNullOrEmpty(banner))
                 {
