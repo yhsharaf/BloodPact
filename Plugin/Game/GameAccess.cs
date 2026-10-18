@@ -50,6 +50,21 @@ namespace RoseNet.Game
         // Moves the character the way the game's own teleporters do (GPE_Teleporter.TeleportOnPoint also
         // updates the character's movement state; setting the transform alone gets snapped back), then lets
         // the room manager load whatever room that lands in.
+        // Puts the character back on a spot (same way as Teleport, without asking for a room change): used every
+        // frame to hold someone in place while the room they were sent to finishes loading.
+        static GameObject pinPoint;
+        public static void Pin(Entity character, Vector3 position)
+        {
+            try
+            {
+                if (pinPoint == null) { pinPoint = new GameObject("Blood Pact hold point"); UnityEngine.Object.DontDestroyOnLoad(pinPoint); }
+                pinPoint.transform.position = position;
+                var tp = pinPoint.GetComponent<GPE_Teleporter>() ?? pinPoint.AddComponent<GPE_Teleporter>();
+                tp.TeleportOnPoint(character);
+            }
+            catch { character.transform.position = position; }
+        }
+
         public static void Teleport(Entity character, Vector3 position)
         {
             var go = new GameObject("Blood Pact teleport point");

@@ -190,6 +190,7 @@ namespace RoseNet.Game
         internal static void Tick()
         {
             Track();
+            HoldInPlace();
             if (pending == null) return;
             var s = pending.Value;
             float now = Time.unscaledTime;
@@ -213,8 +214,44 @@ namespace RoseNet.Game
             if (now < nextTeleport) return;
             nextTeleport = now + 3f;
             teleports++;
-            GameAccess.Teleport(me, s.Position + new Vector3(0f, 0.3f, 0f));
+            var spot = s.Position + new Vector3(0f, 0.3f, 0f);
+            GameAccess.Teleport(me, spot);
+            StartHold(spot, s.BossRoom);
             Plugin.Logger.LogInfo($"[Session] Teleporting to the boss fight (try {teleports}).");
+        }
+
+        // After a teleport we stay on the spot until the room there has loaded (its floor too) plus a moment,
+        // at least 3 seconds; otherwise we can drop through a floor that isn't there yet.
+        static bool holding;
+        static Vector3 holdSpot;
+        static string holdRoom;
+        static float holdStart, roomReadyAt;
+
+        static void StartHold(Vector3 spot, string room)
+        {
+            holding = true;
+            holdSpot = spot;
+            holdRoom = room;
+            holdStart = Time.unscaledTime;
+            roomReadyAt = -1f;
+        }
+
+        static void HoldInPlace()
+        {
+            if (!holding) return;
+            var me = GameAccess.MainCharacter();
+            float now = Time.unscaledTime;
+            if (me == null) return;
+            bool ready = !GameAccess.IsLoadingRoom && GameAccess.CurrentRoomId() == holdRoom;
+            if (!ready) roomReadyAt = -1f;
+            else if (roomReadyAt < 0f) roomReadyAt = now;
+            if ((roomReadyAt >= 0f && now - roomReadyAt >= 1.5f && now - holdStart >= 3f) || now - holdStart > 15f)
+            {
+                holding = false;
+                Plugin.Logger.LogInfo($"[Session] Arrived; free to move ({now - holdStart:0.0} s after the teleport).");
+                return;
+            }
+            GameAccess.Pin(me, holdSpot);
         }
 
         // Our BossFight for the other player's fight, given our copy of their boss. False = not ready yet.
