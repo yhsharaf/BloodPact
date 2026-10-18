@@ -65,7 +65,7 @@ namespace RoseNet.Session
         void Update()
         {
             // A boss intro held for the other player must always let go, connected or not.
-            try { if (!welcomed) BossIntro.Forget(); BossIntro.Tick(); } catch { }
+            try { if (!welcomed) BossIntro.Forget(); BossIntro.Tick(); Spectate.Tick(); } catch { }
             try { Tick(); }
             catch (Exception e)
             {
@@ -1138,6 +1138,8 @@ namespace RoseNet.Session
             BossIntro.OtherPlayerHere = () => welcomed && haveRemote && Time.unscaledTime - remoteTime < RemoteStaleSeconds
                 && !string.IsNullOrEmpty(remote.RoomId) && remote.RoomId == GameAccess.CurrentRoomId();
             BossIntro.Connected = () => welcomed;
+            Spectate.WeAreDead = () => weAreDead;
+            Spectate.PartnerFighting = () => welcomed && !remoteDead && BossIntro.OtherPlayerHere();
             MobTargeting.PuppetHere = () => welcomed && !remoteDead && RemoteInMyRoom(Time.unscaledTime);
             BossIntro.IsHost = Settings != null && Settings.Role == Role.Host;
         }

@@ -182,6 +182,85 @@ namespace RoseNet.Game
         }
     }
 
+    // Spectating: when we die in a boss fight our partner is still fighting, the game's switch back to the
+    // save room (an ApplicationFlowManager state load) waits; our camera stays in the arena. When the fight is
+    // over for us (boss gone, partner down or gone, or 5 minutes), the held switch goes ahead.
+    internal static class Spectate
+    {
+        internal static Func<bool> WeAreDead = () => false, PartnerFighting = () => false;
+        static Action held;
+        static string heldWhat;
+        static float since;
+        internal static bool Replaying;
+
+        static bool BossAliveHere()
+        {
+            string room = GameAccess.CurrentRoomId();
+            if (string.IsNullOrEmpty(room) || room.IndexOf("_Boss_", StringComparison.OrdinalIgnoreCase) < 0) return false;
+            foreach (var kv in MobRegistry.ById)
+            {
+                var mob = kv.Value;
+                if (mob == null || !MobRegistry.InRoom(kv.Key, room) || !MobRegistry.IsAlive(mob)) continue;
+                try { if (mob.GetComponent<BossComponent>() != null) return true; } catch { }
+            }
+            return false;
+        }
+
+        static bool ShouldWatch() => WeAreDead() && PartnerFighting() && BossAliveHere();
+
+        // A state load the game wants to do. True = let it happen now.
+        internal static bool Allow(string what, Action replay)
+        {
+            Plugin.Logger.LogInfo($"[Session] Game state change: {what}{(Replaying ? " (going ahead now)" : "")}.");
+            if (Replaying || held != null) return held == null || Replaying;
+            if (!ShouldWatch()) return true;
+            held = replay;
+            heldWhat = what;
+            since = Time.unscaledTime;
+            BossIntro.Banner = "You fell. Watching your partner fight...";
+            Plugin.Logger.LogInfo($"[Session] We fell in the boss fight; spectating instead of '{what}' for now.");
+            return false;
+        }
+
+        internal static void Tick()
+        {
+            if (held == null) return;
+            if (ShouldWatch() && Time.unscaledTime - since < 300f) return;
+            var go = held;
+            held = null;
+            if (BossIntro.Banner != null && BossIntro.Banner.StartsWith("You fell")) BossIntro.Banner = null;
+            Plugin.Logger.LogInfo($"[Session] Spectating over; '{heldWhat}' goes ahead.");
+            try { Replaying = true; go(); }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not continue after spectating: {e.Message}"); }
+            finally { Replaying = false; }
+        }
+    }
+
+    internal static class SpectatePatches
+    {
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(MotherBase.ApplicationFlowManager.ApplicationFlowManager), nameof(MotherBase.ApplicationFlowManager.ApplicationFlowManager.ReloadCurrentState))]
+        static bool Reload(MotherBase.ApplicationFlowManager.ApplicationFlowManager __instance)
+        {
+            try { var m = __instance; return Spectate.Allow("reload current state", () => m.ReloadCurrentState()); } catch { return true; }
+        }
+
+        // Both LoadState overloads end here. (Never patch the ApplicationStateID overload: it is a value type,
+        // and patching IL2CPP methods with value-type arguments crashes the game.)
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(MotherBase.ApplicationFlowManager.ApplicationFlowManager), nameof(MotherBase.ApplicationFlowManager.ApplicationFlowManager.LoadStateInternal))]
+        static bool LoadInternal(MotherBase.ApplicationFlowManager.ApplicationFlowManager __instance, MotherBase.ApplicationFlowManager.ApplicationState __0)
+        {
+            try
+            {
+                var m = __instance; var st = __0;
+                string name = null; try { name = st != null ? st.name : null; } catch { }
+                return Spectate.Allow($"load state '{name}'", () => m.LoadStateInternal(st));
+            }
+            catch { return true; }
+        }
+    }
+
     internal static class BossIntroPatches
     {
         [HarmonyPostfix]

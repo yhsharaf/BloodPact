@@ -33,6 +33,7 @@
     <Reference Include="MotherBase.GameServices"><HintPath>$(BepInExDir)\interop\MotherBase.GameServices.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="SerializableDictionary"><HintPath>$(BepInExDir)\interop\SerializableDictionary.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="MotherBase.ToolKit"><HintPath>$(BepInExDir)\interop\MotherBase.ToolKit.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MotherBase.ApplicationFlowManager"><HintPath>$(BepInExDir)\interop\MotherBase.ApplicationFlowManager.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Facepunch.Steamworks.Win64"><HintPath>$(BepInExDir)\interop\Facepunch.Steamworks.Win64.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.ParticleSystemModule"><HintPath>$(BepInExDir)\interop\UnityEngine.ParticleSystemModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.IMGUIModule"><HintPath>$(BepInExDir)\interop\UnityEngine.IMGUIModule.dll</HintPath><Private>false</Private></Reference>
