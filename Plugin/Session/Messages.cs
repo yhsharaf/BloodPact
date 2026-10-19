@@ -36,6 +36,7 @@ namespace RoseNet.Session
         BuildInfo = 27,  // which exact Blood Pact build the sender runs (id, version)
         LogRequest = 28, // F10 bug report: "send me your log"
         LogChunk = 29,   // a piece of the sender's compressed log
+        ChestLoot = 30,  // the sender opened a chest: its save key and the ids of the items in it
         BossStart = 21,  // the sender set off a boss encounter: room, trigger key, where they stand (pull the partner in)
     }
 

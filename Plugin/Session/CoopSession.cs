@@ -249,6 +249,15 @@ namespace RoseNet.Session
         void SendWorld()
         {
             WorldSync.Tick();
+            foreach (var (key, items) in WorldSync.OutgoingLoot)
+            {
+                var wl = writer.Begin(MsgType.ChestLoot);
+                wl.Write(key ?? "");
+                wl.Write((byte)items.Length);
+                foreach (var id in items) wl.Write(id);
+                transport.Send(writer.Buffer, writer.Length, true);
+            }
+            WorldSync.OutgoingLoot.Clear();
             var list = WorldSync.Outgoing;
             if (list.Count == 0) return;
             foreach (var c in list)
@@ -1011,6 +1020,14 @@ namespace RoseNet.Session
                 case MsgType.BossStart when welcomed:
                     BossSync.OnRemoteStart(new BossSync.Start { Room = r.ReadString(), BossRoom = r.ReadString(), Trigger = r.ReadString(), Fight = r.ReadString(), BossId = r.ReadUInt32(), Position = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()) });
                     break;
+                case MsgType.ChestLoot when welcomed:
+                {
+                    string key = r.ReadString();
+                    var ids = new string[r.ReadByte()];
+                    for (int i = 0; i < ids.Length; i++) ids[i] = r.ReadString();
+                    WorldSync.OnLoot(key, ids);
+                    break;
+                }
                 case MsgType.WorldState when welcomed:
                     WorldSync.Apply(new WorldSync.Change { Key = r.ReadString(), Kind = r.ReadString(), State = r.ReadString() });
                     break;

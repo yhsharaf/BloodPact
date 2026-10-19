@@ -13,7 +13,7 @@ if (Get-Process -Name "Castlevania Belmont's Curse" -ErrorAction SilentlyContinu
     Write-Host "Close the game first."; exit 1
 }
 New-Item -ItemType Directory -Force $testDir | Out-Null
-$scenarios = if ($Scenario -eq "all") { @("partner-down-win", "owner-down-win", "both-up-win") } else { @($Scenario) }
+$scenarios = if ($Scenario -eq "all") { @("features", "chest", "partner-down-win", "owner-down-win", "both-up-win") } else { @($Scenario) }
 $all = @()
 
 # Each scenario gets two fresh copies of the game, so nothing one leaves open (a reward screen...) affects the next.

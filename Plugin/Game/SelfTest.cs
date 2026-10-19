@@ -133,6 +133,15 @@ namespace RoseNet.Game
             return false;
         }
 
+        static string BossMoves()
+        {
+            var list = Boss()?.GetComponent<MotherBase.ActionFramework.Actor>()?.activeActions;
+            if (list == null) return "";
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < list.Count; i++) sb.Append(list[i].data != null ? list[i].data.name : "?").Append(' ');
+            return sb.ToString().Trim();
+        }
+
         static void SkipDialogue()
         {
             try { foreach (var r in Object.FindObjectsOfType<CutsceneLineReader>()) r.HandleUserSkipped(new InputAction.CallbackContext()); } catch { }
@@ -356,12 +365,137 @@ namespace RoseNet.Game
             if (!Connected()) yield break;
             yield return Seconds(2f);
 
+            if (Scenario == "chest")
+            {
+                var c = Chest();
+                while (c.MoveNext()) yield return c.Current;
+                yield break;
+            }
+            if (Scenario == "features")
+            {
+                var f = Features();
+                while (f.MoveNext()) yield return f.Current;
+                yield break;
+            }
             string[] list = Scenario == "all" ? new[] { "partner-down-win", "owner-down-win", "both-up-win" } : new[] { Scenario };
             for (int i = 0; i < list.Length; i++)
             {
                 var sc = RunScenario(list[i], i);
                 while (sc.MoveNext()) yield return sc.Current;
             }
+        }
+
+        static IEnumerator Features()
+        {
+            Log("=== features ===");
+            yield return Barrier("features");
+            // Same build on both sides (the build check message).
+            yield return Until(() => Session.DebugReport.PartnerBuild != null, 15f, "the partner's build id");
+            Check("features: partner runs the same build", Session.DebugReport.PartnerBuild == Session.DebugReport.BuildId, $"ours {Session.DebugReport.BuildId}, partner {Session.DebugReport.PartnerBuild}");
+
+            // Pause menu online: time must keep running.
+            if (IsHost)
+            {
+                try { if (pad == null || !pad.added) pad = InputSystem.AddDevice("Gamepad", "RoseNet Test Pad", null); GamepadEvents.Queue(pad, new PadInput { Buttons = XInputButtons.Start }); } catch { }
+                yield return Seconds(0.3f);
+                try { GamepadEvents.Queue(pad, default); } catch { }
+                yield return Seconds(2f);
+                string st = StateName();
+                float t0 = Time.time; yield return Seconds(1f); float advanced = Time.time - t0;
+                Check("features: pause menu keeps time running", Time.timeScale > 0.5f && advanced > 0.5f, $"state {st}, timeScale {Time.timeScale:0.00}, game time advanced {advanced:0.00}s in 1s");
+                try { GamepadEvents.Queue(pad, new PadInput { Buttons = XInputButtons.Start }); } catch { }
+                yield return Seconds(0.3f);
+                try { GamepadEvents.Queue(pad, default); } catch { }
+                yield return Seconds(1f);
+            }
+            yield return Barrier("paused");
+
+            // F10 bug report from the guest: both logs land on the guest's PC.
+            if (!IsHost)
+            {
+                Session.DebugReport.StartReport(true, "host");
+                string dir = Session.DebugReport.ReportDir;
+                yield return Until(() => dir != null && Directory.Exists(dir) && Directory.GetFiles(dir, "partner_*.log").Length > 0, 45f, "the partner's log");
+                bool mine = dir != null && Directory.GetFiles(dir, "mine_*.log").Length > 0;
+                string[] partner = dir != null ? Directory.GetFiles(dir, "partner_*.log") : new string[0];
+                long size = partner.Length > 0 ? new FileInfo(partner[0]).Length : 0;
+                Check("features: F10 report has both logs", mine && size > 1000, $"{dir}: ours {mine}, partner's {size} bytes");
+            }
+            yield return Barrier("reported", 90f);
+        }
+
+        static int InventoryCount()
+        {
+            try { var inv = Me?.GetComponent<InventoryComponent>()?.inventory; return inv?._itemsInInventory?.Count ?? -1; } catch { return -1; }
+        }
+
+        // A chest one player opens gives the other its items, wherever they are.
+        static IEnumerator Chest()
+        {
+            Log("=== chest ===");
+            yield return Barrier("chest-start");
+            int before = InventoryCount();
+            if (IsHost)
+            {
+                // An unopened chest in any loaded room.
+                ActivableEntity chest = null; string where = null;
+                foreach (var h in BossSync.SceneObjects<ChestItemHolder>())
+                {
+                    try
+                    {
+                        var act = h.GetComponentInParent<ActivableEntity>();
+                        if (act == null || act.IsActivated() || h.itemGiver == null || h.itemGiver.HasNoItemToGive()) continue;
+                        chest = act; where = PathOf(h.transform); break;
+                    }
+                    catch { }
+                }
+                if (chest == null)
+                {
+                    // No chest near the save: send what a chest opening sends, with an item we (and so the
+                    // guest, same save) don't own yet.
+                    string id = null;
+                    try
+                    {
+                        var have = new System.Collections.Generic.HashSet<string>();
+                        var inv = Me?.GetComponent<InventoryComponent>()?.inventory;
+                        if (inv?._itemsInInventory != null) foreach (var it in inv._itemsInInventory) if (it != null) have.Add(it.itemID);
+                        foreach (var o in Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.Of<ItemData>()))
+                        {
+                            var d = o.TryCast<ItemData>();
+                            if (d == null || d.abstractItem || d.isDeprecated || string.IsNullOrEmpty(d.itemID) || have.Contains(d.itemID)) continue;
+                            if (d.TryCast<CharmItemData>() == null && d.TryCast<SpellItemData>() == null && d.TryCast<WeaponItemData>() == null) continue;
+                            id = d.itemID; break;
+                        }
+                    }
+                    catch (Exception e) { Log($"(item pick: {e.Message})"); }
+                    if (id == null) { Log("(no chest and no spare item to send; skipping)"); Flag("chest-none"); }
+                    else
+                    {
+                        Log($"No chest loaded near the save; sending a chest opening with item '{id}'.");
+                        WorldSync.OutgoingLoot.Add(("selftest-chest", new[] { id }));
+                        Flag("chest-opened");
+                    }
+                }
+                else
+                {
+                    GameAccess.Teleport(Me, chest.transform.position + new Vector3(-1f, 0.3f, 0f));
+                    yield return Seconds(3f);
+                    Log($"Opening chest {where}.");
+                    try { chest.Activate(false); } catch (Exception e) { Log($"(open: {e.Message})"); }
+                    yield return Seconds(1f);
+                    Flag("chest-opened");
+                }
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "chest-opened") || HasFlag(Other, "chest-none"), 60f, "the host to open a chest");
+                if (HasFlag(Other, "chest-opened"))
+                {
+                    yield return Until(() => InventoryCount() > before, 15f, "the chest's items");
+                    Check("chest: partner's chest items reach us in another room", InventoryCount() > before, $"items {before} -> {InventoryCount()}, our room {Room}");
+                }
+            }
+            yield return Barrier("chest-end", 60f);
         }
 
         static IEnumerator RunScenario(string name, int n)
@@ -511,6 +645,24 @@ namespace RoseNet.Game
             {
                 if (name != "both-up-win") yield return Until(() => PartnerDead(), 30f, "the partner to die");
                 yield return Seconds(3f);
+                if (name == "owner-down-win")
+                {
+                    // We took the boss over from the fallen player: it must fight on, and its co-op health must
+                    // not have been raised a second time.
+                    var b = Boss(); var d = b != null ? MobControl.DamageableOf(b) : null;
+                    int max = d != null ? d.maxHealth : -1;
+                    Check($"{name}: we run the room after the partner fell", OwnRoom());
+                    Check($"{name}: boss health raised once after takeover", max > 0 && max <= 1300, $"max health {max} (800 alone, 1280 for two)");
+                    string before = BossMoves(); Vector3 at = b != null ? b.transform.position : Vector3.zero;
+                    bool acted = false;
+                    for (float t = 0f; t < 10f && !acted; t += 0.5f)
+                    {
+                        yield return Seconds(0.5f);
+                        var bb = Boss();
+                        if (bb != null && (BossMoves() != before || Vector3.Distance(bb.transform.position, at) > 0.5f)) acted = true;
+                    }
+                    Check($"{name}: boss keeps fighting after takeover", acted, $"moves before '{before}', now '{BossMoves()}'");
+                }
                 if (iKill) { KillBoss(); Log("Killed the boss."); }
                 yield return Until(() => !BossAlive(), 20f, "the boss to fall");
                 Check($"{name}: boss fell here", !BossAlive());

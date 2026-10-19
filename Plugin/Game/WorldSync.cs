@@ -36,7 +36,61 @@ namespace RoseNet.Game
         // The other player's changes to objects whose room isn't loaded here: applied when they load.
         static readonly Dictionary<string, Change> pending = new Dictionary<string, Change>();
         static readonly HashSet<string> pendingGifts = new HashSet<string>();
-        static readonly HashSet<string> given = new HashSet<string>();
+        // Chests whose items we already have (by save key): each chest gives once.
+        static readonly HashSet<string> givenKeys = new HashSet<string>();
+        // Items in chests we opened, for the other player wherever they are: (chest key, item ids).
+        internal static readonly List<(string key, string[] items)> OutgoingLoot = new List<(string, string[])>();
+
+        static string[] ItemsIn(ItemGiver giver)
+        {
+            var ids = new List<string>();
+            try
+            {
+                if (giver.giveMultipleItems && giver.multipleItems != null)
+                    foreach (var it in giver.multipleItems) { if (it != null && !string.IsNullOrEmpty(it.itemID)) ids.Add(it.itemID); }
+                else if (giver.itemData != null && !string.IsNullOrEmpty(giver.itemData.itemID)) ids.Add(giver.itemData.itemID);
+            }
+            catch { }
+            return ids.ToArray();
+        }
+
+        static Dictionary<string, ItemData> itemsById;
+        static ItemData FindItem(string id)
+        {
+            if (itemsById == null || !itemsById.ContainsKey(id))
+            {
+                itemsById = new Dictionary<string, ItemData>();
+                foreach (var o in Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.Of<ItemData>()))
+                {
+                    var d = o.TryCast<ItemData>();
+                    if (d != null && !string.IsNullOrEmpty(d.itemID)) itemsById[d.itemID] = d;
+                }
+            }
+            return itemsById.TryGetValue(id, out var item) ? item : null;
+        }
+
+        // The other player opened a chest, wherever we are: put its items straight into our inventory.
+        public static void OnLoot(string key, string[] ids)
+        {
+            if (string.IsNullOrEmpty(key) || ids == null || ids.Length == 0 || givenKeys.Contains(key)) return;
+            try
+            {
+                var inv = GameAccess.MainCharacter()?.GetComponent<InventoryComponent>()?.inventory;
+                if (inv == null) { Plugin.Logger.LogWarning("[Session] Chest items from the other player: no inventory yet; they come when the chest's room loads."); return; }
+                var items = new List<ItemData>();
+                foreach (var id in ids)
+                {
+                    var item = FindItem(id);
+                    if (item == null) { Plugin.Logger.LogWarning($"[Session] Chest item '{id}' isn't loaded here; it comes when the chest's room loads."); return; }
+                    items.Add(item);
+                }
+                foreach (var item in items) inv.AddItemToInventory(item, true);
+                givenKeys.Add(key);
+                pendingGifts.Remove(key);
+                Plugin.Logger.LogInfo($"[Session] The other player opened a chest: got its items ({string.Join(", ", ids)}).");
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not add the chest's items: {e.Message}"); }
+        }
         static int detailLogs = 200;
 
         static ItemGiver ChestOf(Tracked tr)
@@ -51,9 +105,9 @@ namespace RoseNet.Game
             catch { return null; }
         }
 
-        static string GiveChestItem(ItemGiver giver, string name)
+        static string GiveChestItem(ItemGiver giver, string key)
         {
-            if (!given.Add(name + "@" + giver.Pointer)) return "";
+            if (!givenKeys.Add(key)) return " (we already have its items)";
             try
             {
                 if (giver.HasNoItemToGive()) return " (no item in it)";
@@ -114,7 +168,7 @@ namespace RoseNet.Game
                     if (pendingGifts.Remove(ks.Item1))
                     {
                         var chest = ChestOf(tr);
-                        if (chest != null) Plugin.Logger.LogInfo($"[Session] Chest '{o.name}' (opened by the other player) is here now{GiveChestItem(chest, o.name)}.");
+                        if (chest != null) Plugin.Logger.LogInfo($"[Session] Chest '{o.name}' (opened by the other player) is here now{GiveChestItem(chest, ks.Item1)}.");
                     }
                     if (pending.TryGetValue(ks.Item1, out var c)) { pending.Remove(ks.Item1); ApplyLive(tr, c); }
                     lastSeen[ks.Item1] = o.GetSaveKeyAndState(entity).Item2 ?? "";
@@ -143,6 +197,13 @@ namespace RoseNet.Game
                     if (lastSeen.TryGetValue(kv.Key, out var was) && was == state) continue;
                     lastSeen[kv.Key] = state;
                     if (resting) continue;   // a rest resets things in bulk; the rest sync covers that
+                    // A chest we just opened: its items go to the other player too, wherever they are (sent first,
+                    // so their copy of the chest, if loaded, doesn't hand them out a second time).
+                    if (ActivatedIn(state, out bool opened) && opened)
+                    {
+                        var giver = ChestOf(tr);
+                        if (giver != null) { var ids = ItemsIn(giver); if (ids.Length > 0) { givenKeys.Add(kv.Key); OutgoingLoot.Add((kv.Key, ids)); } }
+                    }
                     Outgoing.Add(new Change { Key = kv.Key, Kind = tr.Kind, State = state });
                     if (!tr.Savable.name.StartsWith("GPE_DestructibleProp", StringComparison.Ordinal) && detailLogs-- > 0)
                         Plugin.Logger.LogInfo($"[WorldDiag] Changed here: {Short(tr.Kind)} '{PathOf(tr.Savable.transform)}' = {state}; parts: {Parts(tr)}");
@@ -198,7 +259,7 @@ namespace RoseNet.Game
                     // and pick-up sequence. Give its item straight away and show it as opened.
                     if (ActivatedIn(c.State, out bool opened) && opened && act != null && !act.IsActivated())
                     {
-                        live = GiveChestItem(chest, tr.Savable.name);
+                        live = GiveChestItem(chest, c.Key);
                     }
                     tr.Savable.LoadSaveState(tr.Entity, c.State);
                     if (logs-- > 0) Plugin.Logger.LogInfo($"[Session] The other player opened chest '{tr.Savable.name}'; marked opened here{live}.");

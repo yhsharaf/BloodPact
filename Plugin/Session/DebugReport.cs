@@ -93,7 +93,9 @@ namespace RoseNet.Session
             }
         }
 
-        static void StartReport(bool connected, string partnerName)
+        internal static string ReportDir => reportDir;
+
+        internal static void StartReport(bool connected, string partnerName)
         {
             try
             {
