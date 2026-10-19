@@ -628,9 +628,21 @@ namespace RoseNet.Game
                 // ...and the win waits for us in the boss room.
                 GameAccess.Teleport(Me, LeonArena);
                 yield return Until(() => Room == LeonRoom && InGame(), 30f, "back in the arena");
-                yield return Until(() => Boss() != null && !BossAlive(), 20f, "our copy of the boss to fall");
+                yield return Seconds(1.5f);
+                BossSync.EnterBossIntro(Room, Me);   // as if we had walked in through the entrance
+                // Coming back the normal way: the boss's intro plays (hold through its lines), its fight starts,
+                // then it falls for us and leaves its reward.
+                for (float t = 0f; t < 60f && BossAlive(); t += 0.5f)
+                {
+                    if (StateName().Contains("Dialogue")) { var talk = HoldThroughDialogue(); while (talk.MoveNext()) yield return talk.Current; }
+                    SkipDialogue();
+                    yield return Seconds(0.5f);
+                }
                 Check($"{name}: boss falls for us on return", Boss() != null && !BossAlive(), $"boss present {Boss() != null}, alive {BossAlive()}");
-                yield return Seconds(4f);
+                yield return Until(() => StateName().Contains("Absorption") || StateName().Contains("Dialogue"), 20f, "the reward to be offered");
+                if (StateName().Contains("Dialogue")) { var talk2 = HoldThroughDialogue(); while (talk2.MoveNext()) yield return talk2.Current; }
+                yield return Until(() => StateName().Contains("Absorption"), 15f, "the reward to be offered");
+                Check($"{name}: reward offered to us on return", StateName().Contains("Absorption"), $"state {StateName()}");
                 var absorb = Absorb($"{name}: reward absorbed");
                 while (absorb.MoveNext()) yield return absorb.Current;
                 if (StateName().Contains("Menu"))

@@ -440,7 +440,7 @@ namespace RoseNet.Game
         internal static readonly System.Collections.Generic.List<string> Outgoing = new System.Collections.Generic.List<string>();
         internal static bool Applying;
         static string lastRoom, pendingRoom;
-        static float lastAt, pendingAt, roomSince = -1f, nextTry;
+        static float lastAt, pendingAt, roomSince = -1f, nextTry, fightSeen = -1f;
 
         internal static void OnLocalBossDied(Entity boss)
         {
@@ -474,9 +474,14 @@ namespace RoseNet.Game
             float now = Time.unscaledTime;
             if (now < Spectate.RespawningUntil && Spectate.WeAreDead()) return;   // respawning: the win waits for our return
             string here = GameAccess.CurrentRoomId();
-            if (here == null || !beaten.Contains(here)) { roomSince = -1f; return; }
+            if (here == null || !beaten.Contains(here)) { roomSince = -1f; fightSeen = -1f; return; }
             if (roomSince < 0f) roomSince = now;
             if (now - pendingAt < 0.8f || now - roomSince < 0.8f) return;   // let a revive / the room settle first
+            // Our fight here must have begun (the boss's intro, then the fight): a boss that falls before it
+            // starts leaves the game in a fight that never ends, and the reward can't be picked up.
+            if (BossSync.LocalFightRoom != here && now - roomSince < 60f) return;
+            if (BossSync.LocalFightRoom == here && fightSeen < 0f) fightSeen = now + 1.5f;
+            if (BossSync.LocalFightRoom == here && now < fightSeen) return;
             if (now < nextTry) return;
             nextTry = now + 0.5f;
             pendingRoom = here;
