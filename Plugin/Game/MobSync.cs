@@ -689,7 +689,7 @@ namespace RoseNet.Game
             }
 
             float k = 1f - Mathf.Exp(-20f * Time.unscaledDeltaTime);
-            foreach (var kv in MobRegistry.ById)
+            foreach (var kv in new List<KeyValuePair<uint, Entity>>(MobRegistry.ById))
             {
                 var mob = kv.Value;
                 if (mob == null || !MobRegistry.InRoom(kv.Key, roomId)) continue;
@@ -971,6 +971,10 @@ namespace RoseNet.Game
             Actor actor;
             try { actor = mob.GetComponent<Actor>(); } catch { return; }
             if (actor == null || s.ActionCount == 0) return;
+            // While we are down and only watching, a boss's moves stay with its pose: some of them start scenes
+            // (its defeat talk) that would play on our side and then be cut off by our respawn, leaving the game
+            // stuck in a dialogue. Its death plays properly for us when we come back.
+            if (Spectate.Watching && IsBoss(mob)) return;
             var active = actor.activeActions;
             EndFinishedIntro(mob, actor, s);
             if (actionLogs > 0 && Time.unscaledTime >= nextActionLog)
@@ -1230,7 +1234,7 @@ namespace RoseNet.Game
     // leftover moves so its AI picks a new one.
     internal static class TakeoverWatch
     {
-        sealed class Watched { public Entity Mob; public string Name; public Vector3 Pos; public float Since, LastMove, NextLog; public bool Unstuck; }
+        sealed class Watched { public Entity Mob; public string Name; public Vector3 Pos; public float Since, LastMove, NextLog; public bool Unstuck, Unlocked; }
         static readonly List<Watched> watched = new List<Watched>();
 
         static string Actions(Entity mob)
@@ -1259,6 +1263,96 @@ namespace RoseNet.Game
                 return t.name;
             }
             catch { return "?"; }
+        }
+
+        // What the boss's AI sees (why it may not pick a move): on screen, sees its target, waits, its own state.
+        // How often the game runs a watched boss's AI update (0) and its brain's thinking (1).
+        static readonly Dictionary<IntPtr, int[]> calls = new Dictionary<IntPtr, int[]>();
+        internal static void Count(Entity e, int which)
+        {
+            if (watched.Count == 0 || e == null) return;
+            if (!calls.TryGetValue(e.Pointer, out var c)) { bool w = false; foreach (var x in watched) if (x.Mob != null && x.Mob.Pointer == e.Pointer) w = true; if (!w) return; calls[e.Pointer] = c = new int[3]; }
+            c[which]++;
+        }
+
+        static string AiInfo(Entity mob)
+        {
+            try
+            {
+                var ai = mob.GetComponent<AIStateComponent>();
+                var actor = mob.GetComponent<Actor>();
+                var me = GameAccess.MainCharacter();
+                string dist = me != null ? Vector3.Distance(me.transform.position, mob.transform.position).ToString("0.0") : "?";
+                string a = ai == null ? "no AI" : $"AI on {ai.enabled}, on screen {ai.isOnScreen}, sees target {ai.seeingTarget}, clear way {ai.clearWayToTarget}, aggro delay {ai.delayActingAfterAggro:0.00}, move wait {ai.waitTimeBetweenMovements:0.00}";
+                var cam = Camera.main;
+                string camAt = cam != null ? $"camera at {cam.transform.position.x:0.0},{cam.transform.position.y:0.0} (boss in view {InView(cam, mob.transform.position)})" : "no camera";
+                calls.TryGetValue(mob.Pointer, out var cc);
+                a += $", control updates {(cc != null ? cc[0] : 0)}, AI updates {(cc != null ? cc[1] : 0)}, basic thinks {(cc != null ? cc[2] : 0)}";
+                try
+                {
+                    var input = mob.GetComponentInChildren<AIInput>(true);
+                    a += input == null ? ", no AI input" : $", AI input on {input.isActiveAndEnabled} brain {(input.brain != null ? input.brain.GetIl2CppType().Name + " '" + input.brain.name + "'" : "none")}";
+                    var fl = new List<string>();
+                    foreach (var f in mob.GetComponentsInChildren<AFlagComponent>(true)) if (f != null) fl.Add($"{f.GetIl2CppType().Name}={f.flagCounter}");
+                    a += $", flags [{string.Join(" ", fl)}]";
+                    var aa = mob.GetComponentInChildren<AnimatedActor>(true);
+                    if (aa != null) a += $", anim culling {aa.cullingMode} visible {aa.visible} logic {aa._shouldUpdateLogic}";
+                }
+                catch (Exception e) { a += ", (input: " + e.Message + ")"; }
+                return $"{a}, actor on {(actor != null && actor.enabled)}, our Rose {dist} away, {camAt}, state [{BossState.Capture(mob)}]";
+            }
+            catch (Exception e) { return "AI ? " + e.Message; }
+        }
+
+        static bool InView(Camera cam, Vector3 p)
+        {
+            var v = cam.WorldToViewportPoint(p);
+            return v.z > 0f && v.x > -0.05f && v.x < 1.05f && v.y > -0.05f && v.y < 1.05f;
+        }
+
+        // The boss's intro moves lock its controls (a "disable input" flag) until they end. Our copy played
+        // the owner's intro only partly (or had it cut short), so the lock stays: the game then never runs
+        // the boss's AI here and it stands still. Taken over, outside an intro: unlock it.
+        internal static void ClearLeftoverInputLock(Entity mob, string name)
+        {
+            try
+            {
+                var actor = mob.GetComponent<Actor>();
+                var list = actor != null ? actor.activeActions : null;
+                // Only when nothing but its idle movement runs (a real move may be holding the lock right now).
+                if (list != null)
+                    for (int i = 0; i < list.Count; i++)
+                        if (list[i].data != null && list[i].data.name.IndexOf("BaseMovement", StringComparison.OrdinalIgnoreCase) < 0) return;
+                var input = mob.GetComponentInChildren<RedWineDisableInputFlag>(true);
+                var ai = mob.GetComponentInChildren<AIActionLockFlag>(true);
+                int a = input != null ? input.flagCounter : 0, b = ai != null ? ai.flagCounter : 0;
+                if (a <= 0 && b <= 0) return;
+                for (int i = 0; i < a && i < 8; i++) FlagsHelpers.RemoveFlag<RedWineDisableInputFlag>(mob);
+                for (int i = 0; i < b && i < 8; i++) FlagsHelpers.RemoveFlag<AIActionLockFlag>(mob);
+                Plugin.Logger.LogInfo($"[Session] Boss '{name}' still had its controls locked ({a}) and its moves locked ({b}) from an intro our game didn't finish; unlocked them (now {(input != null ? input.flagCounter : 0)}, {(ai != null ? ai.flagCounter : 0)}).");
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not unlock boss '{name}': {e.Message}"); }
+        }
+
+        static void StopStuckLoop(Watched w)
+        {
+            try
+            {
+                var actor = w.Mob.GetComponent<Actor>();
+                var list = actor != null ? actor.activeActions : null;
+                if (list == null) return;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var a = list[i];
+                    string n = a.data != null ? a.data.name : null;
+                    if (n == null || n.IndexOf("Loop", StringComparison.OrdinalIgnoreCase) < 0 || n.IndexOf("BaseMovement", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    actor.StopAction(w.Mob, a, null);
+                    w.LastMove = Time.unscaledTime;
+                    Plugin.Logger.LogInfo($"[Session] Boss '{w.Name}' was stuck in '{n}' after the takeover; stopped it so it picks its next move.");
+                    return;
+                }
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not unstick boss '{w.Name}': {e.Message}"); }
         }
 
         public static void Begin(IEnumerable<Entity> mobs)
@@ -1306,9 +1400,12 @@ namespace RoseNet.Game
                 if (Time.unscaledTime >= w.NextLog)
                 {
                     w.NextLog = Time.unscaledTime + 3f;
-                    Plugin.Logger.LogInfo($"[Session] Boss '{w.Name}' after takeover (+{age:0}s): x {pos.x:0.0} y {pos.y:0.0}, running {Actions(w.Mob)}; targets {TargetName(w.Mob)}.");
+                    Plugin.Logger.LogInfo($"[Session] Boss '{w.Name}' after takeover (+{age:0}s): x {pos.x:0.0} y {pos.y:0.0}, running {Actions(w.Mob)}; targets {TargetName(w.Mob)}; {AiInfo(w.Mob)}.");
                 }
                 if (moved) { w.Pos = pos; w.LastMove = Time.unscaledTime; }   // stuck = no movement for 4 s
+                // A looping move whose end was set up in the fallen player's game (Agnes's dash waits for a
+                // marker it already passed) never ends here: stop it, and the boss picks its next move.
+                else if (Time.unscaledTime - w.LastMove > 4f) { StopStuckLoop(w); if (!w.Unlocked) { w.Unlocked = true; ClearLeftoverInputLock(w.Mob, w.Name); w.LastMove = Time.unscaledTime; } }
             }
         }
     }
@@ -1414,6 +1511,8 @@ namespace RoseNet.Game
     internal static class CoopScaling
     {
         static readonly Dictionary<IntPtr, (Entity mob, float factor)> scaled = new Dictionary<IntPtr, (Entity, float)>();
+        // The raised maximum we set, to notice the game putting it back (a boss fight starting resets it).
+        static readonly Dictionary<IntPtr, int> scaledMax = new Dictionary<IntPtr, int>();
         static float nextCheck;
         static int logs = 10;
 
@@ -1432,6 +1531,21 @@ namespace RoseNet.Game
             foreach (var kv in MobRegistry.ById)
             {
                 var mob = kv.Value;
+                if (mob != null && scaled.TryGetValue(mob.Pointer, out var done) && MobRegistry.IsAlive(mob))
+                {
+                    try
+                    {
+                        var d0 = MobControl.DamageableOf(mob);
+                        if (d0 != null && scaledMax.TryGetValue(mob.Pointer, out var want) && d0.maxHealth != want && d0.maxHealth > 0)
+                        {
+                            int was = d0.maxHealth;
+                            Scale(mob, d0, done.factor);
+                            scaledMax[mob.Pointer] = d0.maxHealth;
+                            if (logs-- > 0) Plugin.Logger.LogInfo($"[Session] Co-op difficulty: '{MobRegistry.PrefabName(mob)}' health was reset by the game ({was}); raised again to {d0.maxHealth}.");
+                        }
+                    }
+                    catch { }
+                }
                 if (mob == null || scaled.ContainsKey(mob.Pointer) || !MobRegistry.InRoom(kv.Key, roomId) || !MobRegistry.IsAlive(mob)) continue;
                 try
                 {
@@ -1442,6 +1556,7 @@ namespace RoseNet.Game
                     int before = d.maxHealth;
                     Scale(mob, d, f);
                     scaled[mob.Pointer] = (mob, f);
+                    scaledMax[mob.Pointer] = d.maxHealth;
                     if (logs-- > 0) Plugin.Logger.LogInfo($"[Session] Co-op difficulty: '{MobRegistry.PrefabName(mob)}' health {before} -> {d.maxHealth} (x{f:0.##}).");
                 }
                 catch { }
@@ -1456,7 +1571,12 @@ namespace RoseNet.Game
             try
             {
                 float f = mob.GetComponent<BossComponent>() != null ? settings.BossHealth[2] : settings.MonsterHealth[2];
-                if (!Mathf.Approximately(f, 1f)) scaled[mob.Pointer] = (mob, f);
+                if (!Mathf.Approximately(f, 1f))
+                {
+                    scaled[mob.Pointer] = (mob, f);
+                    var d = MobControl.DamageableOf(mob);
+                    if (d != null) scaledMax[mob.Pointer] = d.maxHealth;
+                }
             }
             catch { }
         }
@@ -1476,6 +1596,7 @@ namespace RoseNet.Game
                 catch { }
             }
             scaled.Clear();
+            scaledMax.Clear();
         }
     }
 
@@ -1695,7 +1816,11 @@ namespace RoseNet.Game
         // Possessed monsters: no AI decisions and no own movement; only RoseNet starts their actions.
         [HarmonyPrefix]
         [HarmonyPatch(typeof(Actor), nameof(Actor.AutoControlUpdate))]
-        static bool NoAi(Entity __0) => !MobControl.IsPossessed(__0);
+        static bool NoAi(Entity __0) { TakeoverWatch.Count(__0, 0); return !MobControl.IsPossessed(__0); }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AIInput), nameof(AIInput.UpdateAI))]
+        static void CountUpdateAi(Entity __0) => TakeoverWatch.Count(__0, 1);
 
         [HarmonyPrefix]
         [HarmonyPatch(typeof(Actor), nameof(Actor.MovementUpdate))]
@@ -1781,6 +1906,7 @@ namespace RoseNet.Game
             try
             {
                 if (__0 == null) return;
+                TakeoverWatch.Count(__0, 2);
                 var ai = __0.GetComponent<AIStateComponent>();
                 if (ai == null || ai.target == null) return;
                 // Dropping a stand-in that is no longer here can't wait for the next once-a-second check.

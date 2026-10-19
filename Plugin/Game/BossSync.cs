@@ -286,6 +286,7 @@ namespace RoseNet.Game
                 catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Boss room entrance zone: {e.Message}"); }
             }
             Plugin.Logger.LogInfo($"[Session] Entered the boss room by teleport; walked through its entrance zones: {(fired.Count == 0 ? "none" : string.Join(", ", fired))}.");
+            BossIntro.SkipIntroLinesUntil = Time.unscaledTime + 20f;
         }
 
         // Our BossFight for the other player's fight, given our copy of their boss. False = not ready yet.
@@ -318,6 +319,50 @@ namespace RoseNet.Game
             }
             finally { startingLocally = false; }
             return true;
+        }
+
+        // We take a boss over from a partner who fell, but our own game never started this fight (we were
+        // pulled in after its intro, or the room has no entrance trigger): its AI would wait for that start
+        // and stand still. Start our fight now, with our copy of the boss. Returns the boss, or null.
+        internal static Entity StartOurFight(string room)
+        {
+            if (string.IsNullOrEmpty(room) || LocalFightRoom == room) return null;
+            Entity boss = null;
+            foreach (var kv in MobRegistry.ById)
+            {
+                try
+                {
+                    if (kv.Value != null && MobRegistry.InRoom(kv.Key, room) && MobRegistry.IsAlive(kv.Value) && kv.Value.GetComponent<BossComponent>() != null) { boss = kv.Value; break; }
+                }
+                catch { }
+            }
+            if (boss == null) return null;
+            // The room's own fight: the BossFight under this room's scene root, else one already set to our boss.
+            BossFight fight = null, any = null;
+            foreach (var f in SceneObjects<BossFight>())
+            {
+                try
+                {
+                    any ??= f;
+                    var r = f.transform; while (r.parent != null) r = r.parent;
+                    if (room.EndsWith(r.name, StringComparison.Ordinal)) { fight = f; break; }
+                    var cur = f._currentBossVariable != null ? f._currentBossVariable.CurrentValue : null;
+                    if (cur != null && cur.Pointer == boss.Pointer) fight = f;
+                }
+                catch { }
+            }
+            fight ??= any;
+            if (fight == null) { Plugin.Logger.LogWarning("[Session] No boss fight here to start for the takeover."); return null; }
+            try
+            {
+                startingLocally = true;
+                if (fight._currentBossVariable != null) fight._currentBossVariable.SetValue(boss);
+                fight.StartBossFight();
+                Plugin.Logger.LogInfo($"[Session] Our game hadn't started this fight; started it for the takeover ('{fight.name}', boss '{boss.name}').");
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not start the boss fight for the takeover: {e.Message}"); }
+            finally { startingLocally = false; }
+            return boss;
         }
 
         internal static void Forget() { pending = null; Outgoing.Clear(); }

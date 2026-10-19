@@ -29,7 +29,9 @@ namespace RoseNet.Game
         static string lastRoom, declinedRoom, askRoom;
         static bool frozen, shared, remoteSkip;
 
-        internal static bool IsBossRoom(string room) => !string.IsNullOrEmpty(room) && room.IndexOf("_Boss_", StringComparison.OrdinalIgnoreCase) >= 0;
+        // Boss rooms are named "..._Boss_<name>..." or "...BossRoom..." (Mammon's Millers Bridge, Dracula's DraculaBossRoom).
+        internal static bool IsBossRoom(string room) => !string.IsNullOrEmpty(room)
+            && (room.IndexOf("_Boss_", StringComparison.OrdinalIgnoreCase) >= 0 || room.IndexOf("BossRoom", StringComparison.OrdinalIgnoreCase) >= 0);
 
         static bool LiveBossIn(string room)
         {
@@ -95,11 +97,33 @@ namespace RoseNet.Game
             if (notice != null && stage == Stage.None) { Banner = notice; noticeUntil = Time.unscaledTime + 6f; }
         }
 
+        // Pulled into a fight already underway: our copy of the boss's intro talk would hold us still while the
+        // boss attacks (and dying mid-talk leaves the game stuck in it). Hurry through its lines.
+        internal static float SkipIntroLinesUntil;
+        static float nextLineSkip;
+
+        static void SkipIntroLines(float now)
+        {
+            if (now > SkipIntroLinesUntil || now < nextLineSkip) return;
+            nextLineSkip = now + 0.3f;
+            try
+            {
+                foreach (var r in Object.FindObjectsOfType<CutsceneLineReader>())
+                {
+                    if (r == null || !r.IsVisible) continue;
+                    r.HandleUserSkipped(new UnityEngine.InputSystem.InputAction.CallbackContext());
+                    r.EndReading();
+                }
+            }
+            catch { }
+        }
+
         internal static void Tick()
         {
             float now = Time.unscaledTime;
             string room = GameAccess.CurrentRoomId();
             bool loading = GameAccess.IsLoadingRoom;
+            SkipIntroLines(now);
 
             // Called to a fight: clear our banner once we are there.
             if (stage == Stage.None && Banner != null && askRoom != null && room == askRoom && !loading) { Banner = null; askRoom = null; }
@@ -163,6 +187,7 @@ namespace RoseNet.Game
             if (stage != Stage.None) End("disconnected");
             Banner = null;
             shared = false;
+            declinedRoom = null;
         }
 
         // Kept for the old message; nothing waits on it any more.
@@ -217,6 +242,8 @@ namespace RoseNet.Game
     {
         internal static Func<bool> WeAreDead = () => false, PartnerFighting = () => false;
         static Action held;
+        // We are down and watching the other player's fight (our respawn is held back).
+        internal static bool Watching => held != null;
         static string heldWhat;
         static float since;
         internal static bool Replaying;
@@ -224,7 +251,7 @@ namespace RoseNet.Game
         static bool BossAliveHere()
         {
             string room = GameAccess.CurrentRoomId();
-            if (string.IsNullOrEmpty(room) || room.IndexOf("_Boss_", StringComparison.OrdinalIgnoreCase) < 0) return false;
+            if (!BossIntro.IsBossRoom(room)) return false;
             foreach (var kv in MobRegistry.ById)
             {
                 var mob = kv.Value;
@@ -240,8 +267,21 @@ namespace RoseNet.Game
         internal static bool Allow(string what, Action replay)
         {
             Plugin.Logger.LogInfo($"[Session] Game state change: {what}{(Replaying ? " (going ahead now)" : "")}.");
-            if (Replaying || held != null) return held == null || Replaying;
+            if (Replaying) return true;
+            if (held != null)
+            {
+                // Something else than our respawn (quitting to the menu, another load): stop watching, let it go.
+                if (what != heldWhat)
+                {
+                    held = null;
+                    if (BossIntro.Banner != null && BossIntro.Banner.StartsWith("You fell")) BossIntro.Banner = null;
+                    Plugin.Logger.LogInfo($"[Session] Stopped watching the fight: '{what}' goes ahead.");
+                    return true;
+                }
+                return false;
+            }
             if (!ShouldWatch()) return true;
+            if (Victory.Beaten(GameAccess.CurrentRoomId())) return true;   // our partner already won: just respawn
             held = replay;
             heldWhat = what;
             since = Time.unscaledTime;
@@ -384,7 +424,7 @@ namespace RoseNet.Game
         {
             if (held == null) return;
             // The boss is gone while our partner is still here and standing: they won.
-            if (WeAreDead() && PartnerFighting() && !BossAliveHere()) { OnVictory(); return; }
+            if (WeAreDead() && ((PartnerFighting() && !BossAliveHere()) || Victory.Beaten(GameAccess.CurrentRoomId()))) { OnVictory(); return; }
             if (ShouldWatch() && Time.unscaledTime - since < 300f) return;
             var go = held;
             held = null;
@@ -459,6 +499,7 @@ namespace RoseNet.Game
         static readonly System.Collections.Generic.HashSet<string> beaten = new System.Collections.Generic.HashSet<string>();
 
         internal static void ForgetForTest() { beaten.Clear(); MobControl.OwnerKilled.Clear(); }
+        internal static bool Beaten(string room) => room != null && beaten.Contains(room);
 
         internal static void OnRemote(string room)
         {
@@ -472,7 +513,7 @@ namespace RoseNet.Game
         {
             if (beaten.Count == 0 || GameAccess.IsLoadingRoom) return;
             float now = Time.unscaledTime;
-            if (now < Spectate.RespawningUntil && Spectate.WeAreDead()) return;   // respawning: the win waits for our return
+            if (Spectate.WeAreDead()) return;   // down (or respawning): the win waits until we are back up in its room
             string here = GameAccess.CurrentRoomId();
             if (here == null || !beaten.Contains(here)) { roomSince = -1f; fightSeen = -1f; return; }
             if (roomSince < 0f) roomSince = now;
@@ -487,7 +528,7 @@ namespace RoseNet.Game
             pendingRoom = here;
             var me = GameAccess.MainCharacter();
             int n = 0;
-            foreach (var kv in MobRegistry.ById)
+            foreach (var kv in new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<uint, Entity>>(MobRegistry.ById))
             {
                 var mob = kv.Value;
                 // Our copy may already show 0 health (our own last hit, or the owner's), with its death held

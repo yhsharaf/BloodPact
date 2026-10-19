@@ -21,8 +21,27 @@ namespace RoseNet.Game
         internal static Func<bool> Connected = () => false, PartnerDead = () => false, OwnRoom = () => false;
         internal static bool IsHost;
 
-        const string LeonRoom = "World_Biome_01_Streets_Poor_StreetsPoor_Room_Boss_Leon_MainRoom_uid80";
-        static readonly Vector3 LeonArena = new Vector3(176.5f, -37.4f, 0f);
+        // The boss room under test (--rosenet-test-boss <part of the room id>, Leon by default) and a spot in it.
+        static string bossRoom;
+        static Vector3 arenaSpot;
+        static string LeonRoom { get { ResolveBossRoom(); return bossRoom; } }
+        static Vector3 LeonArena { get { ResolveBossRoom(); return arenaSpot; } }
+
+        static void ResolveBossRoom()
+        {
+            if (bossRoom != null) return;
+            string want = CommandLine.Value("rosenet-test-boss") ?? "Boss_Leon";
+            foreach (var r in Rooms())
+            {
+                if (r.Id.IndexOf(want, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                bossRoom = r.Id;
+                arenaSpot = r.Origin + new Vector3(r.Size.x * 0.5f, r.Size.y * 0.5f, 0f);
+                Log($"Boss room under test: {bossRoom} (spot {arenaSpot.x:0.0},{arenaSpot.y:0.0}).");
+                return;
+            }
+            bossRoom = "(none)";
+            Log($"FAIL no boss room matching '{want}' in this level.");
+        }
 
         static string Dir => Path.Combine(BepInEx.Paths.BepInExRootPath, "BloodPact-test");
         static string Role => IsHost ? "host" : "guest";
@@ -33,7 +52,7 @@ namespace RoseNet.Game
         static float waitUntil, waitStarted;
         static string waitWhat;
         static bool started;
-        static int passed, failed;
+        static int passed, failed, fightMaxHealth = -1;
 
         // ---- results ----
 
@@ -88,6 +107,7 @@ namespace RoseNet.Game
                 run = Main();
             }
             if (run == null) return;
+            if (Protect) KeepAlive();
             if (waitFor != null)
             {
                 bool done;
@@ -147,8 +167,21 @@ namespace RoseNet.Game
             try { foreach (var r in Object.FindObjectsOfType<CutsceneLineReader>()) r.HandleUserSkipped(new InputAction.CallbackContext()); } catch { }
         }
 
+        // The test players stand still in the arena: keep their health up, except for the deliberate death.
+        static bool Protect = true;
+        static void KeepAlive()
+        {
+            try
+            {
+                var d = Me != null ? MobControl.DamageableOf(Me) : null;
+                if (d != null && d.isAlive && d.currentHealth > 0 && d.currentHealth < d.maxHealth) d.currentHealth = d.maxHealth;
+            }
+            catch { }
+        }
+
         static void Die()
         {
+            Protect = false;
             var me = Me; var d = me != null ? MobControl.DamageableOf(me) : null;
             if (d == null) return;
             d.currentHealth = 0;
@@ -183,26 +216,50 @@ namespace RoseNet.Game
         static IEnumerator HoldThroughDialogue()
         {
             if (!StateName().Contains("Dialogue")) yield break;
+            try
+            {
+                var who = new System.Collections.Generic.List<string>();
+                foreach (var r in Object.FindObjectsOfType<CutsceneLineReader>()) if (r != null && r.isActiveAndEnabled) who.Add(PathOf(r.transform));
+                var views = new System.Collections.Generic.List<string>();
+                foreach (var v in Object.FindObjectsOfType<Doozy.Runtime.UIManager.Containers.UIView>()) if (v != null && v.isVisible && v.name.IndexOf("HUD", StringComparison.OrdinalIgnoreCase) < 0) views.Add(v.name);
+                Log($"Dialogue up in {Room}: line readers {(who.Count == 0 ? "none" : string.Join(" | ", who))}; views {string.Join(", ", views)}");
+            }
+            catch (Exception e) { Log($"(dialogue dump: {e.Message})"); }
             float until = Time.unscaledTime + 60f;
             try { if (pad == null || !pad.added) pad = InputSystem.AddDevice("Gamepad", "RoseNet Test Pad", null); } catch { }
+            float started = Time.unscaledTime;
             while (Time.unscaledTime < until && StateName().Contains("Dialogue"))
             {
                 try { GamepadEvents.Queue(pad, new PadInput { Buttons = XInputButtons.A }); } catch { }
                 SkipDialogue();
-                yield return Seconds(0.5f);
+                // Full-screen conversations only listen to the focused window; forcing their lines to end breaks
+                // the scene, so those are left waiting (the checks after them are skipped).
+                if (FullScreenTalk() && Time.unscaledTime - started > 8f) break;
+                yield return Seconds(0.7f);
             }
             try { GamepadEvents.Queue(pad, default); } catch { }
             yield return Seconds(0.5f);
             Log($"Dialogue over: state {StateName()}.");
         }
 
+        static bool FullScreenTalk()
+        {
+            try
+            {
+                foreach (var v in Object.FindObjectsOfType<Doozy.Runtime.UIManager.Containers.UIView>())
+                    if (v != null && v.isVisible && v.name.Contains("DialogueBoxFullScreen")) return true;
+            }
+            catch { }
+            return false;
+        }
+
         static IEnumerator MoveProbe(string name)
         {
             var talk = HoldThroughDialogue();
             while (talk.MoveNext()) yield return talk.Current;
-            if (StateName().Contains("Menu"))
+            if (StateName().Contains("Menu") || (StateName().Contains("Dialogue") && FullScreenTalk()))
             {
-                Log($"({name}: skipped, a game menu (the reward popup) waits for a press a background window can't give)");
+                Log($"({name}: skipped, the game's {(StateName().Contains("Menu") ? "reward popup" : "full-screen conversation")} waits for a press a background window can't give)");
                 yield break;
             }
             if (Me == null) { Check(name, false, "no Rose"); yield break; }
@@ -356,7 +413,21 @@ namespace RoseNet.Game
             if (Me == null)
             {
                 yield return Seconds(4f);
-                try { Object.FindObjectOfType<MainMenuAnimationController>()?.ContinueGameFromMain(); Log("Continue pressed."); }
+                try
+                {
+                    var menu = Object.FindObjectOfType<MainMenuAnimationController>();
+                    // --rosenet-test-slot N: play that save (only an existing one: never create a save).
+                    if (int.TryParse(CommandLine.Value("rosenet-test-slot"), out int slot))
+                    {
+                        bool exists = false;
+                        try { exists = menu.saveMenuManager != null && menu.saveMenuManager.SaveExists(slot); } catch { }
+                        if (!exists) { Log($"FAIL save slot {slot} doesn't exist; not creating one."); yield break; }
+                        menu._selectedSaveIndex = slot;
+                        Log($"Using save slot {slot}.");
+                    }
+                    menu?.ContinueGameFromMain();
+                    Log("Continue pressed.");
+                }
                 catch (Exception e) { Log($"FAIL could not continue from the main menu: {e.Message}"); yield break; }
             }
             yield return Until(InGame, 180f, "the game to load");
@@ -364,7 +435,27 @@ namespace RoseNet.Game
             Check("connected", Connected());
             if (!Connected()) yield break;
             yield return Seconds(2f);
+            if (CommandLine.Value("rosenet-test-level") != null)
+            {
+                var sw = SwitchLevel();
+                while (sw.MoveNext()) yield return sw.Current;
+                yield return Barrier("level", 240f);
+                yield return Until(() => Connected(), 60f, "the other copy after the area switch");
+                yield return Seconds(2f);
+            }
 
+            if (Scenario == "monsters")
+            {
+                var mo = Monsters();
+                while (mo.MoveNext()) yield return mo.Current;
+                yield break;
+            }
+            if (Scenario == "map-bosses")
+            {
+                var m = MapBosses();
+                while (m.MoveNext()) yield return m.Current;
+                yield break;
+            }
             if (Scenario == "chest")
             {
                 var c = Chest();
@@ -422,6 +513,283 @@ namespace RoseNet.Game
                 Check("features: F10 report has both logs", mine && size > 1000, $"{dir}: ours {mine}, partner's {size} bytes");
             }
             yield return Barrier("reported", 90f);
+        }
+
+        // ---- the level's rooms ----
+
+        internal struct RoomInfo { public string Id; public Vector3 Origin; public Vector2 Size; }
+
+        static System.Collections.Generic.List<RoomInfo> Rooms()
+        {
+            var list = new System.Collections.Generic.List<RoomInfo>();
+            var world = GameAccess.RoomSystem?.worldInstance;
+            MotherBase.RoomDesigner.WorldSettings settings = null;
+            foreach (var o in Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.Of<MotherBase.RoomDesigner.WorldSettings>()))
+            { settings = o.TryCast<MotherBase.RoomDesigner.WorldSettings>(); if (settings != null) break; }
+            if (world == null || settings == null) { Log($"(no room list: world {world != null}, settings {settings != null})"); return list; }
+            foreach (var kv in world._roomHandles)
+            {
+                var r = kv.Key;
+                if (r == null || r.roomData == null) continue;
+                list.Add(new RoomInfo
+                {
+                    Id = r.id,
+                    Origin = r.GetWorldPosition(settings),
+                    Size = new Vector2(r.roomData.GetWidth() * settings.chunkWidth, r.roomData.GetHeight() * settings.chunkHeight),
+                });
+            }
+            return list;
+        }
+
+        // Teleport somewhere and stay pinned there until the room under us has loaded.
+        static IEnumerator GoTo(Vector3 spot, string room, float timeout = 20f)
+        {
+            float until = Time.unscaledTime + timeout;
+            GameAccess.Teleport(Me, spot);
+            while (Time.unscaledTime < until && !(Room == room && InGame()))
+            {
+                if (Me != null) GameAccess.Pin(Me, spot);
+                yield return Seconds(0.1f);
+            }
+            for (int i = 0; i < 10 && Me != null; i++) { GameAccess.Pin(Me, spot); yield return Seconds(0.1f); }
+        }
+
+        // --rosenet-test-level <state name>: switch to that level (area) first. Saves are never written in tests,
+        // so this only lasts for the test.
+        static IEnumerator SwitchLevel()
+        {
+            string want = CommandLine.Value("rosenet-test-level");
+            var names = new System.Collections.Generic.List<string>();
+            MotherBase.ApplicationFlowManager.ApplicationState target = null;
+            foreach (var o in Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.Of<MotherBase.ApplicationFlowManager.ApplicationState>()))
+            {
+                var st = o.TryCast<MotherBase.ApplicationFlowManager.ApplicationState>();
+                if (st == null) continue;
+                names.Add(st.name);
+                if (want != null && st.name == want) target = st;
+            }
+            Log($"Areas the game knows: {string.Join(", ", names)}");
+            if (want == null) yield break;
+            if (target == null) { Log($"FAIL no area named '{want}'"); yield break; }
+            var afm = Object.FindObjectOfType<MotherBase.ApplicationFlowManager.ApplicationFlowManager>();
+            Log($"Switching to area '{want}'.");
+            afm.LoadState(target);
+            yield return Seconds(5f);
+            yield return Until(InGame, 180f, "the new area to load");
+            Log($"Now in {Room}.");
+            yield return Seconds(3f);
+        }
+
+        // Which boss rooms does this save have, which bosses live there, and where do they stand?
+        static IEnumerator MapBosses()
+        {
+            Log("=== map-bosses ===");
+            if (!IsHost) yield break;
+            var rooms = Rooms();
+            Log($"{rooms.Count} rooms in this level; current room {Room} at {Me.transform.position.x:0.0},{Me.transform.position.y:0.0}.");
+            foreach (var r in rooms) if (r.Id == Room) Log($"  our room origin {r.Origin.x:0.0},{r.Origin.y:0.0} size {r.Size.x:0}x{r.Size.y:0}");
+            var lines = new System.Collections.Generic.List<string>();
+            foreach (var r in rooms)
+            {
+                if (r.Id.IndexOf("Boss", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                // Try the middle of the room, then its lower half (floors are low in arenas).
+                var spot = r.Origin + new Vector3(r.Size.x * 0.5f, r.Size.y * 0.5f, 0f);
+                var go = GoTo(spot, r.Id);
+                while (go.MoveNext()) yield return go.Current;
+                bool arrived = Room == r.Id;
+                yield return Seconds(2f);
+                var b = Boss();
+                string bossInfo = b == null ? "no boss" : $"boss '{MobRegistry.PrefabName(b)}' {(BossAlive() ? "alive" : "dead")} at {b.transform.position.x:0.0},{b.transform.position.y:0.0}";
+                string line = $"{r.Id}|{(arrived ? "reached" : "NOT reached (now " + Room + ")")}|origin {r.Origin.x:0.0},{r.Origin.y:0.0} size {r.Size.x:0}x{r.Size.y:0}|{bossInfo}";
+                Log("  " + line);
+                lines.Add(line);
+            }
+            try { File.WriteAllLines(Path.Combine(Dir, "bosses.txt"), lines); } catch { }
+            Log($"Mapped {lines.Count} boss rooms.");
+        }
+
+        // ---- monsters and world objects in a shared room ----
+
+        static System.Collections.Generic.List<(uint id, Entity mob)> LiveMonsters()
+        {
+            var list = new System.Collections.Generic.List<(uint, Entity)>();
+            foreach (var kv in MobRegistry.ById)
+            {
+                try
+                {
+                    if (kv.Value == null || !MobRegistry.InRoom(kv.Key, Room) || !MobRegistry.IsAlive(kv.Value)) continue;
+                    if (kv.Value.GetComponent<BossComponent>() != null) continue;
+                    list.Add((kv.Key, kv.Value));
+                }
+                catch { }
+            }
+            return list;
+        }
+
+        static float F(string t) => float.Parse(t, System.Globalization.CultureInfo.InvariantCulture);
+        static string S(float v) => v.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        static IEnumerator Monsters()
+        {
+            Log("=== monsters ===");
+            yield return Barrier("monsters-start");
+            string roomFile = Path.Combine(Dir, "monster-room.txt");
+            if (IsHost)
+            {
+                // A regular room with at least 3 live monsters.
+                string found = null; Vector3 at = Vector3.zero;
+                foreach (var r in Rooms())
+                {
+                    if (r.Id.IndexOf("Boss", StringComparison.OrdinalIgnoreCase) >= 0 || r.Id.IndexOf("Save", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    var spot = r.Origin + new Vector3(r.Size.x * 0.5f, r.Size.y * 0.5f, 0f);
+                    var go = GoTo(spot, r.Id, 12f);
+                    while (go.MoveNext()) yield return go.Current;
+                    yield return Seconds(2.5f);
+                    if (Room == r.Id && LiveMonsters().Count >= 3) { found = r.Id; at = spot; break; }
+                }
+                if (found == null)
+                {
+                    Log("(no room with 3 live monsters; skipping)");
+                    File.WriteAllText(roomFile, "none");
+                    Flag("monster-room");
+                    yield return Barrier("monsters-end", 120f);
+                    yield break;
+                }
+                File.WriteAllText(roomFile, found + "|" + S(at.x) + "|" + S(at.y));
+                Log("Monster room: " + found + " with " + LiveMonsters().Count + " monsters.");
+                Flag("monster-room");
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "monster-room"), 600f, "the host to find a monster room");
+                string[] f = File.ReadAllText(roomFile).Split('|');
+                if (f.Length < 3) { yield return Barrier("monsters-end", 120f); yield break; }
+                var go = GoTo(new Vector3(F(f[1]), F(f[2]), 0f), f[0], 20f);
+                while (go.MoveNext()) yield return go.Current;
+            }
+            yield return Barrier("monsters-together", 120f);
+            yield return Seconds(4f);
+
+            // 1. Same monsters on both sides, in about the same places.
+            string listFile = Path.Combine(Dir, "monsters-host.txt");
+            if (IsHost)
+            {
+                var lines = new System.Collections.Generic.List<string>();
+                foreach (var (id, mob) in LiveMonsters()) lines.Add(id + "|" + S(mob.transform.position.x) + "|" + S(mob.transform.position.y));
+                File.WriteAllLines(listFile, lines);
+                Check("monsters: we run the room (entered first)", OwnRoom());
+                Flag("monsters-listed");
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "monsters-listed"), 30f, "the host's monster list");
+                int same = 0, near = 0, total = 0;
+                foreach (var line in File.ReadAllLines(listFile))
+                {
+                    var p2 = line.Split('|'); total++;
+                    if (!uint.TryParse(p2[0], out var id) || !MobRegistry.ById.TryGetValue(id, out var mob) || mob == null || !MobRegistry.IsAlive(mob)) continue;
+                    same++;
+                    if (Vector2.Distance(new Vector2(F(p2[1]), F(p2[2])), mob.transform.position) < 3f) near++;
+                }
+                Check("monsters: guest sees the host's monsters", total > 0 && same == total, same + " of " + total);
+                Check("monsters: in the same places", total > 0 && near >= total - 1, near + " of " + total + " within 3 units");
+            }
+            yield return Barrier("monsters-compared", 60f);
+
+            // 2. A monster the host kills dies for the guest too.
+            string killFile = Path.Combine(Dir, "monster-killed.txt");
+            if (IsHost)
+            {
+                var live = LiveMonsters();
+                if (live.Count > 0)
+                {
+                    var (id, mob) = live[0];
+                    var d = MobControl.DamageableOf(mob);
+                    try { d.currentHealth = 0; d.Die(mob, Me, new DamageData()); } catch (Exception e) { Log("(kill: " + e.Message + ")"); }
+                    File.WriteAllText(killFile, id.ToString());
+                    Log("Killed monster " + id + " (" + MobRegistry.PrefabName(mob) + ").");
+                }
+                Flag("monster-killed");
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "monster-killed"), 30f, "the host's kill");
+                if (File.Exists(killFile) && uint.TryParse(File.ReadAllText(killFile), out var id))
+                {
+                    yield return Until(() => !MobRegistry.ById.TryGetValue(id, out var m) || m == null || !MobRegistry.IsAlive(m), 6f, "the monster to die here");
+                    bool gone = !MobRegistry.ById.TryGetValue(id, out var mm) || mm == null || !MobRegistry.IsAlive(mm);
+                    Check("monsters: host's kill shows for the guest", gone, "monster " + id);
+                }
+            }
+            yield return Barrier("monsters-killed", 60f);
+
+            // 3. The guest's hit reaches the host's monster.
+            string hitFile = Path.Combine(Dir, "monster-hit.txt");
+            if (!IsHost)
+            {
+                var live = LiveMonsters();
+                if (live.Count > 0)
+                {
+                    var (id, mob) = live[0];
+                    MobControl.OutgoingHits.Add((id, 5));
+                    File.WriteAllText(hitFile, id.ToString());
+                    Log("Hit monster " + id + " for 5.");
+                }
+                Flag("monster-hit");
+            }
+            else
+            {
+                var before = new System.Collections.Generic.Dictionary<uint, int>();
+                foreach (var (id, mob) in LiveMonsters()) before[id] = MobControl.DamageableOf(mob)?.currentHealth ?? -1;
+                yield return Until(() => HasFlag(Other, "monster-hit"), 30f, "the guest's hit");
+                if (File.Exists(hitFile) && uint.TryParse(File.ReadAllText(hitFile), out var hid) && before.TryGetValue(hid, out var hp0))
+                {
+                    yield return Until(() => MobRegistry.ById.TryGetValue(hid, out var m) && m != null && (MobControl.DamageableOf(m)?.currentHealth ?? hp0) < hp0, 5f, "the hit to land");
+                    int hp1 = MobRegistry.ById.TryGetValue(hid, out var mm) && mm != null ? (MobControl.DamageableOf(mm)?.currentHealth ?? -1) : -1;
+                    Check("monsters: guest's hit lands on the host's monster", hp1 < hp0, "health " + hp0 + " -> " + hp1);
+                }
+            }
+            yield return Barrier("monsters-hit", 60f);
+
+            // 4. A switch the host flips flips for the guest (same room).
+            string switchFile = Path.Combine(Dir, "switch.txt");
+            if (IsHost)
+            {
+                string done = "none";
+                foreach (var act in BossSync.SceneObjects<ActivableEntity>())
+                {
+                    try
+                    {
+                        if (act.IsActivated() || act.GetComponentInChildren<ChestItemHolder>(true) != null) continue;
+                        var sav = act.GetComponentInChildren<SavableEntityBase>(true) ?? act.GetComponentInParent<SavableEntityBase>();
+                        if (sav == null) continue;
+                        string path = PathOf(act.transform);
+                        if (!Room.EndsWith(path.Split('/')[0], StringComparison.Ordinal)) continue;
+                        if (path.IndexOf("Trigger", StringComparison.OrdinalIgnoreCase) >= 0 || path.IndexOf("DestructibleProp", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                        act.Activate(false);
+                        done = path;
+                        break;
+                    }
+                    catch { }
+                }
+                File.WriteAllText(switchFile, done);
+                Log("Flipped switch: " + done + ".");
+                Flag("switch");
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "switch"), 30f, "the host's switch");
+                string path = File.Exists(switchFile) ? File.ReadAllText(switchFile) : "none";
+                if (path == "none") Log("(no switch in this room to test)");
+                else
+                {
+                    ActivableEntity mine = null;
+                    foreach (var act in BossSync.SceneObjects<ActivableEntity>()) { try { if (PathOf(act.transform) == path) { mine = act; break; } } catch { } }
+                    yield return Until(() => mine != null && mine.IsActivated(), 6f, "the switch to flip here");
+                    Check("world: host's switch flips for the guest", mine != null && mine.IsActivated(), path);
+                }
+            }
+            yield return Barrier("monsters-end", 60f);
         }
 
         static int InventoryCount()
@@ -523,8 +891,8 @@ namespace RoseNet.Game
             // The host walks into the arena first (it runs the room) and calls the guest (auto "yes").
             if (IsHost)
             {
-                GameAccess.Teleport(Me, LeonArena);
-                yield return Until(() => Room == LeonRoom, 20f, "the arena");
+                var go = GoTo(LeonArena, LeonRoom);
+                while (go.MoveNext()) yield return go.Current;
             }
             yield return Until(() => Room == LeonRoom && InGame(), 60f, "both in the arena");
             Check($"{name}: in the arena", Room == LeonRoom);
@@ -598,16 +966,20 @@ namespace RoseNet.Game
             float seenFight = -1f;
             while (Time.unscaledTime < until)
             {
+                // The boss's intro talk comes first (Carmilla, Agnes...): hold through it, like a player would.
+                if (StateName().Contains("Dialogue")) { var talk0 = HoldThroughDialogue(); while (talk0.MoveNext()) yield return talk0.Current; }
                 SkipDialogue();
-                bool fighting = BossAlive() && !BossInIntro();
+                // Running = the game's own fight has started here (not just a boss moving about before its intro).
+                bool fighting = BossAlive() && !BossInIntro() && BossSync.LocalFightRoom == Room;
                 if (!fighting) seenFight = -1f;
                 else if (seenFight < 0f) seenFight = Time.unscaledTime;
                 else if (Time.unscaledTime - seenFight > 2f) break;
                 yield return Seconds(0.4f);
             }
-            Check($"{name}: boss fight running", BossAlive() && !BossInIntro(), $"boss alive {BossAlive()}, intro {BossInIntro()}");
+            Check($"{name}: boss fight running", BossAlive() && !BossInIntro() && BossSync.LocalFightRoom == Room, $"boss alive {BossAlive()}, intro {BossInIntro()}, game's fight started {BossSync.LocalFightRoom == Room}");
             yield return Barrier($"fight{n}");
 
+            { var bb = Boss(); var dd = bb != null ? MobControl.DamageableOf(bb) : null; fightMaxHealth = dd != null ? dd.maxHealth : -1; }
             bool owner = OwnRoom();
             bool iDie = name == "partner-down-win" ? !owner : name == "owner-down-win" ? owner : false;
             bool iKill = name == "both-up-win" ? owner : !iDie;
@@ -615,6 +987,11 @@ namespace RoseNet.Game
 
             if (iDie)
             {
+                if (owner)
+                {
+                    var ob = Boss(); var od = ob != null ? MobControl.DamageableOf(ob) : null;
+                    File.WriteAllText(Path.Combine(Dir, "owner-boss-max.txt"), (od != null ? od.maxHealth : -1).ToString());
+                }
                 Die();
                 yield return Seconds(1f);
                 Check($"{name}: died", !Alive());
@@ -622,11 +999,22 @@ namespace RoseNet.Game
                 // The partner won: we respawn at the mirror as normal...
                 yield return Until(() => InGame() && Alive() && Room != LeonRoom && GameplayState(), 60f, "respawn after the win");
                 Check($"{name}: respawned after partner's win", InGame() && Alive() && Room != LeonRoom, Diagnose());
+                Protect = true;
                 yield return Seconds(5f);   // the get-up animation after a respawn
+                Check($"{name}: no dialogue stuck after the respawn", !StateName().Contains("Dialogue"), $"state {StateName()}");
                 var probe = MoveProbe($"{name}: can move after respawn");
                 while (probe.MoveNext()) yield return probe.Current;
-                // ...and the win waits for us in the boss room.
-                GameAccess.Teleport(Me, LeonArena);
+                // ...and the win waits for us in the boss room. The mirror can be in another area (slot 2 saves
+                // in the Streets): go back to the boss's area first, the way a player would walk back.
+                bool arenaHere = false;
+                foreach (var r in Rooms()) if (r.Id == LeonRoom) { arenaHere = true; break; }
+                if (!arenaHere && CommandLine.Value("rosenet-test-level") != null)
+                {
+                    var sw = SwitchLevel();
+                    while (sw.MoveNext()) yield return sw.Current;
+                }
+                var back = GoTo(LeonArena, LeonRoom);
+                while (back.MoveNext()) yield return back.Current;
                 yield return Until(() => Room == LeonRoom && InGame(), 30f, "back in the arena");
                 yield return Seconds(1.5f);
                 BossSync.EnterBossIntro(Room, Me);   // as if we had walked in through the entrance
@@ -639,12 +1027,14 @@ namespace RoseNet.Game
                     yield return Seconds(0.5f);
                 }
                 Check($"{name}: boss falls for us on return", Boss() != null && !BossAlive(), $"boss present {Boss() != null}, alive {BossAlive()}");
+                yield return Until(() => BossMoves().IndexOf("Death", StringComparison.OrdinalIgnoreCase) < 0, 40f, "the boss's death scene to end");
                 yield return Until(() => StateName().Contains("Absorption") || StateName().Contains("Dialogue"), 20f, "the reward to be offered");
                 if (StateName().Contains("Dialogue")) { var talk2 = HoldThroughDialogue(); while (talk2.MoveNext()) yield return talk2.Current; }
                 yield return Until(() => StateName().Contains("Absorption"), 15f, "the reward to be offered");
                 Check($"{name}: reward offered to us on return", StateName().Contains("Absorption"), $"state {StateName()}");
                 var absorb = Absorb($"{name}: reward absorbed");
                 while (absorb.MoveNext()) yield return absorb.Current;
+                yield return Until(() => !StateName().Contains("Absorption"), 20f, "the reward pickup to finish");
                 if (StateName().Contains("Menu"))
                     Log("(the reward popup waits for a button press; a background window can't press it, so the move check is skipped)");
                 else
@@ -655,7 +1045,16 @@ namespace RoseNet.Game
             }
             else
             {
-                if (name != "both-up-win") yield return Until(() => PartnerDead(), 30f, "the partner to die");
+                if (name != "both-up-win")
+                {
+                    // The boss's health just before the takeover (co-op scaling lands a moment into the fight).
+                    for (float t = 0f; t < 30f && !PartnerDead(); t += 0.1f)
+                    {
+                        var bb = Boss(); var dd = bb != null ? MobControl.DamageableOf(bb) : null;
+                        if (dd != null) fightMaxHealth = dd.maxHealth;
+                        yield return Seconds(0.1f);
+                    }
+                }
                 yield return Seconds(3f);
                 if (name == "owner-down-win")
                 {
@@ -663,8 +1062,10 @@ namespace RoseNet.Game
                     // not have been raised a second time.
                     var b = Boss(); var d = b != null ? MobControl.DamageableOf(b) : null;
                     int max = d != null ? d.maxHealth : -1;
+                    // Compare with the fallen owner's own copy (ours only mirrored it, at its solo health).
+                    try { var f = Path.Combine(Dir, "owner-boss-max.txt"); if (File.Exists(f) && int.TryParse(File.ReadAllText(f), out var om) && om > 0) fightMaxHealth = om; } catch { }
                     Check($"{name}: we run the room after the partner fell", OwnRoom());
-                    Check($"{name}: boss health raised once after takeover", max > 0 && max <= 1300, $"max health {max} (800 alone, 1280 for two)");
+                    Check($"{name}: boss health raised once after takeover", max > 0 && max == fightMaxHealth, $"max health {max}, during the fight {fightMaxHealth}");
                     string before = BossMoves(); Vector3 at = b != null ? b.transform.position : Vector3.zero;
                     bool acted = false;
                     for (float t = 0f; t < 10f && !acted; t += 0.5f)
@@ -680,8 +1081,11 @@ namespace RoseNet.Game
                 Check($"{name}: boss fell here", !BossAlive());
                 Flag($"killed{n}");
                 yield return Seconds(4f);
+                // Some deaths are a scene of their own (Agnes holds Rose): let it play out first.
+                yield return Until(() => BossMoves().IndexOf("Death", StringComparison.OrdinalIgnoreCase) < 0, 40f, "the boss's death scene to end");
                 var absorb = Absorb($"{name}: reward absorbed");
                 while (absorb.MoveNext()) yield return absorb.Current;
+                yield return Until(() => !StateName().Contains("Absorption"), 20f, "the reward pickup to finish");
                 if (StateName().Contains("Menu"))
                     Log("(the reward popup waits for a button press; a background window can't press it, so the move check is skipped)");
                 else

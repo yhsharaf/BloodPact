@@ -4,6 +4,9 @@
 param(
     [string]$Scenario = "all",
     [int]$TimeoutMinutes = 8,
+    [int]$Slot = -1,
+    [string]$Boss = "",
+    [string]$Level = "",
     [string]$Game = "C:\Program Files (x86)\Steam\steamapps\common\Castlevania Belmont's Curse"
 )
 
@@ -20,6 +23,9 @@ $all = @()
 foreach ($sc in $scenarios) {
     Get-ChildItem $testDir -File | Remove-Item -Force
     $common = "--rosenet-transport udp --rosenet-host 127.0.0.1 --rosenet-test $sc"
+    if ($Slot -ge 0) { $common += " --rosenet-test-slot $Slot" }
+    if ($Boss -ne "") { $common += " --rosenet-test-boss $Boss" }
+    if ($Level -ne "") { $common += " --rosenet-test-level $Level" }
     Start-Process -FilePath $exe -WorkingDirectory $Game -ArgumentList "--rosenet-role host $common"
     Start-Sleep -Seconds 8
     Start-Process -FilePath $exe -WorkingDirectory $Game -ArgumentList "--rosenet-role guest $common"
@@ -39,6 +45,13 @@ foreach ($sc in $scenarios) {
     }
     Get-Process -Name "Castlevania Belmont's Curse" -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 5
+    # Keep both games' logs of this run (the next run overwrites them).
+    $logDir = Join-Path $Game "BepInEx\BloodPact-test-logs"
+    New-Item -ItemType Directory -Force $logDir | Out-Null
+    $tag = if ($Boss -ne "") { "$Boss-$sc" } else { $sc }
+    foreach ($l in "LogOutput.log", "LogOutput.1.log") {
+        Copy-Item (Join-Path $Game "BepInEx\$l") (Join-Path $logDir "$tag-$l") -Force -ErrorAction SilentlyContinue
+    }
 }
 $all | ForEach-Object { Write-Host $_ }
 $summary = Join-Path $Game "BepInEx\BloodPact-test-summary.txt"

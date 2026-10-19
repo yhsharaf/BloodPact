@@ -69,11 +69,25 @@ namespace RoseNet.Session
         void Update()
         {
             // A boss intro held for the other player must always let go, connected or not.
-            try { if (!welcomed) BossIntro.Forget(); BossIntro.Tick(); Spectate.Tick(); Victory.Tick(); BossCheat.Tick(Settings != null && Settings.BossLowHealthKey); TakeoverWatch.Tick(); } catch { }
+            Guard("intro", () => { if (!welcomed) BossIntro.Forget(); BossIntro.Tick(); });
+            Guard("spectate", Spectate.Tick);
+            Guard("victory", () => { if (!welcomed) Victory.Outgoing.Clear(); Victory.Tick(); });
+            Guard("debug keys", () => BossCheat.Tick(Settings != null && Settings.BossLowHealthKey));
+            Guard("takeover", TakeoverWatch.Tick);
             try { KeepWorldRunning(); } catch { }
+            try { ClearOrphanTalk(); } catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Clearing a cut-off conversation: {e.Message}"); backSince = -100f; }
             try { DebugReport.Tick(welcomed, remoteName); } catch { }
             try { SelfTest.Tick(); } catch (Exception e) { Plugin.Logger.LogWarning($"[Test] {e.Message}"); }
-            if (welcomed && !buildSent) { buildSent = true; try { DebugReport.SendBuild(); } catch { } }
+            if (welcomed && !buildSent)
+            {
+                buildSent = true;
+                try { DebugReport.SendBuild(); } catch { }
+                try
+                {
+                    if (weAreDead) { var wd = writer.Begin(MsgType.PlayerDied); wd.Write(true); transport.Send(writer.Buffer, writer.Length, true); }
+                }
+                catch { }
+            }
             if (!welcomed) buildSent = false;
             try { Tick(); }
             catch (Exception e)
@@ -156,6 +170,34 @@ namespace RoseNet.Session
         // both players, and fights, holds and timers would stall. While a partner is connected, time keeps going
         // (the menu still opens; our own Rose just stands there). Only our "Fight together?" question stops it.
         bool loggedPause, buildSent;
+        readonly System.Collections.Generic.HashSet<string> guardLogged = new System.Collections.Generic.HashSet<string>();
+
+        void Guard(string what, Action a)
+        {
+            try { a(); }
+            catch (Exception e) { if (guardLogged.Add(what)) Plugin.Logger.LogWarning($"[Session] {what}: {e}"); }
+        }
+        float backSince = -100f, talkIdleSince = -1f;
+
+        // Back from a respawn with a conversation's "dialogue" state still on (its scene was cut off by the
+        // reload): nothing is shown, yet the player can't move. Take that state off.
+        void ClearOrphanTalk()
+        {
+            float now = Time.unscaledTime;
+            if (now - backSince > 15f) { talkIdleSince = -1f; return; }
+            var gsm = GameStateManager.GetInstance();
+            if (gsm == null || !gsm.IsDialogueState()) { talkIdleSince = -1f; return; }
+            foreach (var r in UnityEngine.Object.FindObjectsOfType<CutsceneLineReader>())
+                if (r != null && r.IsVisible) { talkIdleSince = -1f; return; }
+            if (talkIdleSince < 0f) { talkIdleSince = now; return; }
+            if (now - talkIdleSince < 4f) return;
+            int popped = 0;
+            foreach (var entry in gsm._states.ToArray())
+                if (entry != null && entry.Item2 != null && gsm.dialogueState != null && entry.Item2.Pointer == gsm.dialogueState.Pointer) { gsm.PopState(entry.Item1, null); popped++; }
+            Plugin.Logger.LogInfo($"[Session] A conversation cut off by the respawn was still holding the controls; cleared it ({popped}).");
+            talkIdleSince = -1f;
+            backSince = -100f;
+        }
         string refuseReason;
         float notConnectedSince = -1f;
 
@@ -186,6 +228,7 @@ namespace RoseNet.Session
             w.Write(dead);
             transport.Send(writer.Buffer, writer.Length, true);
             Plugin.Logger.LogInfo(dead ? "[Session] Our Rose died; telling the other player." : "[Session] Our Rose is back.");
+            if (!dead) backSince = Time.unscaledTime;
             // We ran this room (a boss fight too) and fell: the survivor's game carries on with its monsters, so
             // ours now follows theirs (spectating shows their fight, their hits and the boss's health).
             float now = Time.unscaledTime;
@@ -213,7 +256,14 @@ namespace RoseNet.Session
                 describedMobs.Clear();
                 mobMirror.Release(healthWasScaled: true);
                 Plugin.Logger.LogInfo("[Session] We run this room's monsters now (the other player fell).");
-                TakeoverWatch.Begin(mobMirror.Released);
+                var took = new System.Collections.Generic.List<Entity>(mobMirror.Released);
+                try
+                {
+                    var boss = BossSync.StartOurFight(GameAccess.CurrentRoomId());
+                    if (boss != null && !took.Exists(m => m != null && m.Pointer == boss.Pointer)) took.Add(boss);
+                }
+                catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Takeover fight start: {e.Message}"); }
+                TakeoverWatch.Begin(took);
             }
         }
 
@@ -229,7 +279,14 @@ namespace RoseNet.Session
             int i = 0;
             do
             {
-                int n = Math.Min(PerMessage, changes.Count - i);
+                int n = 0, bytes = 0;
+                while (n < PerMessage && i + n < changes.Count)
+                {
+                    var c = changes[i + n];
+                    int size = 8 + 3 * ((c.Key ?? "").Length + (c.Value ?? "").Length);
+                    if (n > 0 && bytes + size > 48000) break;
+                    bytes += size; n++;
+                }
                 var w = writer.Begin(MsgType.RestSync);
                 w.Write(first);
                 w.Write((ushort)n);
@@ -404,6 +461,16 @@ namespace RoseNet.Session
                     nextMobSend = now + MobSendInterval;
                     SendMonsters();
                 }
+                if (together && roomSteady)
+                    BossState.Send(trackedRoom, (id, snap) =>
+                    {
+                        var wb = writer.Begin(MsgType.BossState);
+                        wb.Write(trackedRoom);
+                        wb.Write(id);
+                        wb.Write(snap);
+                        transport.Send(writer.Buffer, writer.Length, true);
+                    });
+                else if (!together) BossState.Forget();
                 if (together && roomSteady && now >= nextPoseSend)
                 {
                     nextPoseSend = now + 1f / 20f;
@@ -503,6 +570,14 @@ namespace RoseNet.Session
                 mobStates.Add(s);
             }
             if (room == trackedRoom) lastStreamAt = Time.unscaledTime;
+            if (room == trackedRoom && iOwnRoom && Settings.Role == Role.Guest && !remoteDead && !weAreDead)
+            {
+                // Both of us were running this room (a claim got lost): the host's stream wins.
+                iOwnRoom = false;
+                describedMobs.Clear();
+                try { CoopScaling.RevertAll(); } catch { }
+                Plugin.Logger.LogInfo("[Session] The host is also running this room; following the host's monsters.");
+            }
             if (room == trackedRoom && !iOwnRoom) mobMirror.Receive(mobStates);
         }
 
@@ -556,6 +631,15 @@ namespace RoseNet.Session
             puppetRebuilds = 0;
             puppet?.Destroy();
             puppet = null;
+            // Nobody to play with any more: monsters back to solo health and normal culling, and nothing of
+            // that partner's session is carried over to the next one.
+            remoteDead = false;
+            try { CoopScaling.RevertAll(); } catch { }
+            try { MobCulling.Restore(); } catch { }
+            try { BossState.Forget(); } catch { }
+            try { RestSync.Forget(); } catch { }
+            try { BossSync.Forget(); } catch { }
+            Victory.Outgoing.Clear();
         }
 
         // ---- sending ----
@@ -849,6 +933,16 @@ namespace RoseNet.Session
         [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp]
         void OnMessage(byte[] data, int length)
         {
+            try { HandleMessage(data, length); }
+            catch (Exception e)
+            {
+                if (guardLogged.Add("message " + (length > 0 ? data[0] : 0))) Plugin.Logger.LogWarning($"[Session] Could not read a message (type {(length > 0 ? data[0] : 0)}): {e.Message}");
+            }
+        }
+
+        [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp]
+        void HandleMessage(byte[] data, int length)
+        {
             if (length < 1) return;
             using var r = new BinaryReader(new MemoryStream(data, 1, length - 1, false));
             switch ((MsgType)data[0])
@@ -1058,6 +1152,14 @@ namespace RoseNet.Session
                 case MsgType.BossStart when welcomed:
                     BossSync.OnRemoteStart(new BossSync.Start { Room = r.ReadString(), BossRoom = r.ReadString(), Trigger = r.ReadString(), Fight = r.ReadString(), BossId = r.ReadUInt32(), Position = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()) });
                     break;
+                case MsgType.BossState when welcomed:
+                {
+                    string room = r.ReadString();
+                    uint id = r.ReadUInt32();
+                    string snap = r.ReadString();
+                    if (!iOwnRoom && room == trackedRoom && MobRegistry.ById.TryGetValue(id, out var boss)) BossState.Apply(boss, snap);
+                    break;
+                }
                 case MsgType.ChestLoot when welcomed:
                 {
                     string key = r.ReadString();
@@ -1276,6 +1378,7 @@ namespace RoseNet.Session
             BossIntro.OtherPlayerHere = () => welcomed && haveRemote && Time.unscaledTime - remoteTime < RemoteStaleSeconds
                 && !string.IsNullOrEmpty(remote.RoomId) && remote.RoomId == GameAccess.CurrentRoomId();
             DebugReport.Send = (buf, len) => { if (transport != null) transport.Send(buf, len, true); };
+            RestSync.Connected = () => welcomed;
             SelfTest.IsHost = Settings.Role == Role.Host;
             SelfTest.Connected = () => welcomed && haveRemote;
             SelfTest.PartnerDead = () => remoteDead;
@@ -1291,6 +1394,7 @@ namespace RoseNet.Session
 
         void OnDestroy()
         {
+            try { BossIntro.Forget(); } catch { }
             try
             {
                 if (transport != null && welcomed)

@@ -37,8 +37,24 @@ namespace RoseNet.Game
         internal static bool Resting => startedAt >= 0 && Time.unscaledTime - startedAt < 12f;
 
         // Our player started resting.
+        // Set by the session: a rest is only shared while a partner is connected.
+        internal static System.Func<bool> Connected = () => true;
+
+        // Disconnected: whatever rest we were watching is not shared later with someone else.
+        internal static void Forget()
+        {
+            snapshot = null;
+            startedAt = -1;
+            checksDone = 0;
+            Outgoing.Clear();
+            sent.Clear();
+            FirstBatchPending = false;
+            leftKeys.Clear();
+        }
+
         public static void OnLocalRest()
         {
+            if (!Connected()) return;
             if (snapshot != null && Time.unscaledTime - startedAt < 3f) return; // already watching this rest
             var states = States();
             if (states == null) return;
