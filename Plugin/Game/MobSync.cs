@@ -1322,7 +1322,7 @@ namespace RoseNet.Game
                 // Only when nothing but its idle movement runs (a real move may be holding the lock right now).
                 if (list != null)
                     for (int i = 0; i < list.Count; i++)
-                        if (list[i].data != null && list[i].data.name.IndexOf("BaseMovement", StringComparison.OrdinalIgnoreCase) < 0) return;
+                        if (list[i].data != null && !IsIdleMove(list[i].data.name)) return;
                 var input = mob.GetComponentInChildren<RedWineDisableInputFlag>(true);
                 var ai = mob.GetComponentInChildren<AIActionLockFlag>(true);
                 int a = input != null ? input.flagCounter : 0, b = ai != null ? ai.flagCounter : 0;
@@ -1333,6 +1333,9 @@ namespace RoseNet.Game
             }
             catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not unlock boss '{name}': {e.Message}"); }
         }
+
+        // A boss's idle movement: "..._BaseMovement", DraculaBeast's "..._BaseGroundMovement"...
+        static bool IsIdleMove(string n) => n != null && n.IndexOf("_Base", StringComparison.OrdinalIgnoreCase) >= 0 && n.EndsWith("Movement", StringComparison.OrdinalIgnoreCase);
 
         static void StopStuckLoop(Watched w)
         {
@@ -1345,7 +1348,7 @@ namespace RoseNet.Game
                 {
                     var a = list[i];
                     string n = a.data != null ? a.data.name : null;
-                    if (n == null || n.IndexOf("Loop", StringComparison.OrdinalIgnoreCase) < 0 || n.IndexOf("BaseMovement", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    if (n == null || n.IndexOf("Loop", StringComparison.OrdinalIgnoreCase) < 0 || IsIdleMove(n)) continue;
                     actor.StopAction(w.Mob, a, null);
                     w.LastMove = Time.unscaledTime;
                     Plugin.Logger.LogInfo($"[Session] Boss '{w.Name}' was stuck in '{n}' after the takeover; stopped it so it picks its next move.");
