@@ -71,6 +71,10 @@ namespace RoseNet.Session
             // A boss intro held for the other player must always let go, connected or not.
             try { if (!welcomed) BossIntro.Forget(); BossIntro.Tick(); Spectate.Tick(); Victory.Tick(); BossCheat.Tick(Settings != null && Settings.BossLowHealthKey); TakeoverWatch.Tick(); } catch { }
             try { KeepWorldRunning(); } catch { }
+            try { DebugReport.Tick(welcomed, remoteName); } catch { }
+            try { SelfTest.Tick(); } catch (Exception e) { Plugin.Logger.LogWarning($"[Test] {e.Message}"); }
+            if (welcomed && !buildSent) { buildSent = true; try { DebugReport.SendBuild(); } catch { } }
+            if (!welcomed) buildSent = false;
             try { Tick(); }
             catch (Exception e)
             {
@@ -151,7 +155,7 @@ namespace RoseNet.Session
         // The game pauses by stopping time. Whoever runs a room's monsters (a boss too) would freeze them for
         // both players, and fights, holds and timers would stall. While a partner is connected, time keeps going
         // (the menu still opens; our own Rose just stands there). Only our "Fight together?" question stops it.
-        bool loggedPause;
+        bool loggedPause, buildSent;
 
         void KeepWorldRunning()
         {
@@ -572,7 +576,7 @@ namespace RoseNet.Session
         // ---- on-screen: name over the other Rose, a small status line, and the window title ----
 
         string remoteName = "";
-        GUIStyle nameStyle, nameShadow, statusStyle;
+        GUIStyle nameStyle, nameShadow, statusStyle, noteStyle;
         float nextTitle;
         bool guiFailed;
 
@@ -590,6 +594,15 @@ namespace RoseNet.Session
 
                 if (Settings.ShowStatus)
                     GUI.Label(new Rect(10, 4, 700, 22), StatusText(), statusStyle);
+                string warn = welcomed ? DebugReport.BuildWarning(remoteName) : null;
+                string note = DebugReport.Notice;
+                if (warn != null || note != null)
+                {
+                    if (noteStyle == null) { noteStyle = MakeStyle(14, FontStyle.Bold, TextAnchor.UpperLeft, new Color(1f, 0.8f, 0.3f)); noteStyle.wordWrap = true; }
+                    float y = 44;
+                    if (warn != null) { GUI.Label(new Rect(10, y, Screen.width - 20, 40), warn, noteStyle); y += 22; }
+                    if (note != null) GUI.Label(new Rect(10, y, Screen.width - 20, 40), note, noteStyle);
+                }
 
                 if (welcomed)
                 {
@@ -648,7 +661,7 @@ namespace RoseNet.Session
             if (refused) return $"Blood Pact {role}: refused by host (see log)";
             if (!welcomed) return Settings.Role == Role.Host ? $"Blood Pact Host: waiting for a guest" : "Blood Pact Guest: looking for the host...";
             string where = haveRemote && puppet != null && !puppet.Visible ? " (in another room)" : "";
-            return $"Blood Pact {role}: playing with {(string.IsNullOrEmpty(remoteName) ? "Player 2" : remoteName)}{where}";
+            return $"Blood Pact {role}: playing with {(string.IsNullOrEmpty(remoteName) ? "Player 2" : remoteName)}{where}   [{Plugin.Version} {DebugReport.BuildId}, F10 = bug report]";
         }
 
         void UpdateWindowTitle(float now)
@@ -826,6 +839,15 @@ namespace RoseNet.Session
                     }
                     break;
                 }
+                case MsgType.BuildInfo when welcomed:
+                    DebugReport.OnBuild(r, remoteName);
+                    break;
+                case MsgType.LogRequest when welcomed:
+                    DebugReport.OnRequest(r, remoteName);
+                    break;
+                case MsgType.LogChunk when welcomed:
+                    DebugReport.OnChunk(r, remoteName);
+                    break;
                 case MsgType.State when welcomed:
                 {
                     // Read into a scratch copy first so a late packet cannot overwrite a newer pose.
@@ -1198,6 +1220,11 @@ namespace RoseNet.Session
             // Compared with the room we are in right now (trackedRoom lags behind while a room loads).
             BossIntro.OtherPlayerHere = () => welcomed && haveRemote && Time.unscaledTime - remoteTime < RemoteStaleSeconds
                 && !string.IsNullOrEmpty(remote.RoomId) && remote.RoomId == GameAccess.CurrentRoomId();
+            DebugReport.Send = (buf, len) => { if (transport != null) transport.Send(buf, len, true); };
+            SelfTest.IsHost = Settings.Role == Role.Host;
+            SelfTest.Connected = () => welcomed && haveRemote;
+            SelfTest.PartnerDead = () => remoteDead;
+            SelfTest.OwnRoom = () => iOwnRoom;
             BossIntro.Connected = () => welcomed;
             BossIntro.PartnerInThisArea = () => haveRemote && remote != null && !string.IsNullOrEmpty(remote.RoomId)
                 && PartnerMap.Area(remote.RoomId) == PartnerMap.Area(GameAccess.CurrentRoomId());

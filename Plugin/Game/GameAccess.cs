@@ -102,6 +102,12 @@ namespace RoseNet.Game
         [HarmonyPatch(typeof(MotherBase.GameServices.StandaloneAccount), nameof(MotherBase.GameServices.StandaloneAccount.WriteSave))]
         static bool BlockGuestSaveFile(string __0, ref bool __result)
         {
+            if (SelfTest.Active && (__0 == null || __0.IndexOf("PLAYERPREFS", StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                Plugin.Logger.LogInfo($"[Test] Not writing '{__0}' (self-test: saves stay as they are).");
+                __result = true;
+                return false;
+            }
             if (!Session.CoopSession.IsGuest || (__0 != null && __0.IndexOf("PLAYERPREFS", StringComparison.OrdinalIgnoreCase) >= 0)) return true;
             if (!AnotherCopyRunning()) return true;
             Plugin.Logger.LogInfo($"[Session] Guest: did not write '{__0}' (another copy of the game on this PC uses the same save folder).");

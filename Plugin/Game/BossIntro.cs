@@ -29,7 +29,7 @@ namespace RoseNet.Game
         static string lastRoom, declinedRoom, askRoom;
         static bool frozen, shared, remoteSkip;
 
-        static bool IsBossRoom(string room) => !string.IsNullOrEmpty(room) && room.IndexOf("_Boss_", StringComparison.OrdinalIgnoreCase) >= 0;
+        internal static bool IsBossRoom(string room) => !string.IsNullOrEmpty(room) && room.IndexOf("_Boss_", StringComparison.OrdinalIgnoreCase) >= 0;
 
         static bool LiveBossIn(string room)
         {
@@ -136,7 +136,7 @@ namespace RoseNet.Game
                 case Stage.Asking:
                     if (!Connected()) { End("not connected"); break; }
                     if (OtherPlayerHere()) { End("the other player is already here"); break; }
-                    if (Pressed(true))
+                    if (Pressed(true) || SelfTest.Active)
                     {
                         BossSync.CallPartner(room);
                         stage = Stage.Waiting;
@@ -251,12 +251,22 @@ namespace RoseNet.Game
         }
 
         // Our partner won while we were down: no trip back to the save room; we get up where we fell.
+        // Our partner won while we were down. Getting up on the spot fights the game's own death sequence (the
+        // player can stay frozen), so the respawn the game wanted goes ahead as normal; the win waits for us:
+        // back in the boss room, our copy of the boss falls and we get its reward (see Victory).
+        internal static float RespawningUntil;
+
         internal static void OnVictory()
         {
             if (held == null) return;
+            var go = held;
             held = null;
-            if (BossIntro.Banner != null && BossIntro.Banner.StartsWith("You fell")) BossIntro.Banner = null;
-            Revive();
+            RespawningUntil = Time.unscaledTime + 10f;
+            BossIntro.CallOver("Your partner won! Go back to the boss room for your reward.");
+            Plugin.Logger.LogInfo($"[Session] The other player won while we were down; '{heldWhat}' goes ahead (respawn), the boss falls for us when we are back in its room.");
+            try { Replaying = true; go(); }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not respawn after the win: {e.Message}"); }
+            finally { Replaying = false; }
         }
 
         // Dying hides the player HUD and shows the death screen; normally the respawn's level reload brings it
@@ -272,6 +282,74 @@ namespace RoseNet.Game
                 Doozy.Runtime.UIManager.Containers.UIView.Show(Doozy.Runtime.UIManager.UIViewId.GameplayHUD.CurrencyHUD, false);
             }
             catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not show the HUD again: {e.Message}"); }
+        }
+
+        // The respawn we held back had already started: the game pushed its "loading" state, which blocks all
+        // input (moving, the pause menu, picking up the boss reward) until the load ends. That load never
+        // happens now, so take the state off ourselves.
+        static void ReleaseLoadingLock()
+        {
+            // The respawn's first half already ran: the flow manager marked a level load as started (that flag
+            // blocks the player's input) and told the game it began. Cancel it and tell the game it ended.
+            try
+            {
+                var afm = Object.FindObjectOfType<MotherBase.ApplicationFlowManager.ApplicationFlowManager>();
+                bool wasLoading = MotherBase.ApplicationFlowManager.ApplicationFlowManager._isLoading;
+                if (afm != null && wasLoading)
+                {
+                    MotherBase.ApplicationFlowManager.ApplicationFlowManager._isLoading = false;
+                    afm._nextStateLogic = null;
+                    try { afm.onEndLoadState?.Invoke(); } catch (Exception e) { Plugin.Logger.LogWarning($"[Session] End-of-load signal: {e.Message}"); }
+                }
+                Plugin.Logger.LogInfo($"[Session] Level load in progress when getting up: {wasLoading}{(wasLoading ? " (cancelled)" : "")}.");
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not cancel the held respawn: {e.Message}"); }
+            try
+            {
+                var gsm = GameStateManager.GetInstance();
+                if (gsm == null) return;
+                string before = StateName(gsm);
+                for (int i = 0; i < 3 && gsm.IsLoadingState(); i++) gsm.TryPopLoadingStateFromApplicationFlow();
+                // The death may have left the player as a dead player: no input, in stasis, HUD hidden, the
+                // gameplay controls switched off. Put the player back as the current state wants them.
+                string maps = ActiveMaps(gsm);
+                var st = gsm.activeState;
+                if (st != null) gsm.ApplyPlayerState(st);
+                Plugin.Logger.LogInfo($"[Session] Game state after getting up: {before} -> {StateName(gsm)}{(gsm.IsLoadingState() ? " (still loading: input may stay blocked)" : "")}; controls on before: {maps}; after: {ActiveMaps(gsm)}; our Rose runs: {RoseMoves()}.");
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not unblock input after getting up: {e.Message}"); }
+        }
+
+        static string ActiveMaps(GameStateManager gsm)
+        {
+            try
+            {
+                var asset = gsm.inputActionAsset;
+                if (asset == null) return "?";
+                var on = new System.Collections.Generic.List<string>();
+                foreach (var m in asset.actionMaps) if (m.enabled) on.Add(m.name);
+                return on.Count > 0 ? string.Join(",", on) : "none";
+            }
+            catch { return "?"; }
+        }
+
+        static string RoseMoves()
+        {
+            try
+            {
+                var me = GameAccess.MainCharacter();
+                var list = me?.GetComponent<Actor>()?.activeActions;
+                if (list == null) return "?";
+                var names = new System.Collections.Generic.List<string>();
+                for (int i = 0; i < list.Count; i++) names.Add(list[i].data != null ? list[i].data.name : "?");
+                return names.Count > 0 ? string.Join(" ", names) : "none";
+            }
+            catch { return "?"; }
+        }
+
+        static string StateName(GameStateManager gsm)
+        {
+            try { var st = gsm.activeState; return st != null ? st.name : "none"; } catch { return "?"; }
         }
 
         static void Revive()
@@ -296,6 +374,7 @@ namespace RoseNet.Game
                     foreach (var a in dying) actor.StopAction(me, a, null);
                 }
                 RestoreHud();
+                ReleaseLoadingLock();
                 Plugin.Logger.LogInfo("[Session] The other player won the boss fight; we get up where we fell.");
             }
             catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not revive after the boss fight: {e.Message}"); }
@@ -317,17 +396,22 @@ namespace RoseNet.Game
         }
     }
 
-    // Testing aid ([Debug] BossLowHealthKey): F9 drops the living bosses in our room to half health, then 1 HP. A boss the other
+    // Testing aid ([Debug] BossLowHealthKey): F9 drops the living bosses in our room to 1 HP. A boss the other
     // game runs gets the damage through the normal hit path, so both worlds agree.
     internal static class BossCheat
     {
         public static void Tick(bool enabled)
         {
             if (!enabled) return;
-            bool pressed;
-            try { var kb = UnityEngine.InputSystem.Keyboard.current; pressed = kb != null && kb.f9Key.wasPressedThisFrame; }
+            bool f9;
+            try { var kb = UnityEngine.InputSystem.Keyboard.current; f9 = kb != null && kb.f9Key.wasPressedThisFrame; }
             catch { return; }
-            if (!pressed) return;
+            if (f9) DropBosses();
+        }
+
+        // F9: every living boss in our room to 1 HP (in both games: a boss the other game runs gets the hit).
+        static void DropBosses()
+        {
             string room = GameAccess.CurrentRoomId();
             int n = 0;
             foreach (var kv in MobRegistry.ById)
@@ -339,15 +423,13 @@ namespace RoseNet.Game
                     if (mob.GetComponent<BossComponent>() == null) continue;
                     var d = MobControl.DamageableOf(mob);
                     if (d == null || d.currentHealth <= 1) continue;
-                    // First press: half health (reaches a second phase); next press: 1 HP.
-                    int target = d.currentHealth > d.maxHealth * 0.55f ? Mathf.Max(1, d.maxHealth / 2) : 1;
-                    if (MobControl.IsPossessed(mob)) MobControl.OutgoingHits.Add((kv.Key, d.currentHealth - target));
-                    else { d.currentHealth = target; BossHud.Refresh(mob, d); }
+                    if (MobControl.IsPossessed(mob)) MobControl.OutgoingHits.Add((kv.Key, d.currentHealth - 1));
+                    else { d.currentHealth = 1; BossHud.Refresh(mob, d); }
                     n++;
                 }
                 catch { }
             }
-            Plugin.Logger.LogInfo($"[Session] Debug: {n} boss(es) dropped (half health first, then 1 HP).");
+            Plugin.Logger.LogInfo($"[Session] Debug F9: {n} boss(es) dropped to 1 HP.");
         }
     }
 
@@ -358,7 +440,7 @@ namespace RoseNet.Game
         internal static readonly System.Collections.Generic.List<string> Outgoing = new System.Collections.Generic.List<string>();
         internal static bool Applying;
         static string lastRoom, pendingRoom;
-        static float lastAt, pendingAt;
+        static float lastAt, pendingAt, roomSince = -1f, nextTry;
 
         internal static void OnLocalBossDied(Entity boss)
         {
@@ -371,20 +453,33 @@ namespace RoseNet.Game
             Plugin.Logger.LogInfo($"[Session] Boss defeated here ({boss.name}); telling the other player.");
         }
 
+        // Bosses the other player beat this session. Our copy falls whenever we are in that room, however
+        // late we get there (we may have died at the same moment and respawned, or been elsewhere): we get
+        // the win and the reward too, and the boss never comes back to life here.
+        static readonly System.Collections.Generic.HashSet<string> beaten = new System.Collections.Generic.HashSet<string>();
+
+        internal static void ForgetForTest() { beaten.Clear(); MobControl.OwnerKilled.Clear(); }
+
         internal static void OnRemote(string room)
         {
             Plugin.Logger.LogInfo($"[Session] The other player defeated the boss in {room}.");
-            pendingRoom = room;
+            beaten.Add(room);
             pendingAt = Time.unscaledTime;
             Spectate.OnVictory();
         }
 
         internal static void Tick()
         {
-            if (pendingRoom == null) return;
+            if (beaten.Count == 0 || GameAccess.IsLoadingRoom) return;
             float now = Time.unscaledTime;
-            if (GameAccess.CurrentRoomId() != pendingRoom) { if (now - pendingAt > 10f) pendingRoom = null; return; }
-            if (now - pendingAt < 0.8f) return;   // let a revive settle first
+            if (now < Spectate.RespawningUntil && Spectate.WeAreDead()) return;   // respawning: the win waits for our return
+            string here = GameAccess.CurrentRoomId();
+            if (here == null || !beaten.Contains(here)) { roomSince = -1f; return; }
+            if (roomSince < 0f) roomSince = now;
+            if (now - pendingAt < 0.8f || now - roomSince < 0.8f) return;   // let a revive / the room settle first
+            if (now < nextTry) return;
+            nextTry = now + 0.5f;
+            pendingRoom = here;
             var me = GameAccess.MainCharacter();
             int n = 0;
             foreach (var kv in MobRegistry.ById)
@@ -396,6 +491,9 @@ namespace RoseNet.Game
                 try
                 {
                     if (mob.destroyed || !mob.gameObject.activeInHierarchy || mob.GetComponent<BossComponent>() == null) continue;
+                    // Ours already fell for real (we ran it): nothing to do. A copy driven by the other game can
+                    // show 0 health with its death held back; that one still needs the game's own death.
+                    if (!MobControl.IsPossessed(mob) && !MobRegistry.IsAlive(mob)) continue;
                     var d = MobControl.DamageableOf(mob);
                     if (d == null) continue;
                     Applying = true;
@@ -403,6 +501,7 @@ namespace RoseNet.Game
                     MobControl.AllowDeath = true;
                     MobControl.AllowStart = true;
                     MobPatches.ShowAgain?.Invoke(mob);   // back where it is, drawn, so its death and drops happen there
+                    MobControl.Possessed.Remove(mob.Pointer);   // its death plays here, with all its moves (the reward)
                     if (d.currentHealth <= 0) d.currentHealth = 1;
                     d.currentHealth = 0;
                     d.Die(mob, me, new DamageData());
@@ -412,7 +511,6 @@ namespace RoseNet.Game
                 finally { Applying = false; MobControl.AllowDeath = false; MobControl.AllowStart = false; }
             }
             if (n > 0) Plugin.Logger.LogInfo($"[Session] Our copy of the boss falls too ({n}).");
-            pendingRoom = null;
         }
     }
 

@@ -33,6 +33,9 @@ namespace RoseNet.Session
         IntroSkip = 24,  // host -> guest: skip the current intro dialogue line
         PlayerDied = 25, // the sender's Rose died (bool: true = died, false = alive again)
         BossDefeated = 26, // the boss in the sender's room died (room id)
+        BuildInfo = 27,  // which exact Blood Pact build the sender runs (id, version)
+        LogRequest = 28, // F10 bug report: "send me your log"
+        LogChunk = 29,   // a piece of the sender's compressed log
         BossStart = 21,  // the sender set off a boss encounter: room, trigger key, where they stand (pull the partner in)
     }
 

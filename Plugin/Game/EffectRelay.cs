@@ -120,19 +120,50 @@ namespace RoseNet.Game
             return list;
         }
 
-        // Start an effect of the other player on their stand-in without its screen-wide parts: they are switched
-        // off just while the effect starts (the shared asset is ours too) and switched back on right after.
+        static bool IsScreenPart(FeedbackFeature f) => f != null && ScreenParts.Contains(f.GetIl2CppType().Name);
+
+        // Start an effect of the other player on their stand-in, then take its screen-wide parts out of that one
+        // running copy (the effect asset itself is shared with our own Rose and is never changed).
         public static Il2CppSystem.Guid StartBodyOnly(FeedbackContainer container, Feedback f)
         {
-            var off = new List<FeedbackFeature>();
+            var guid = container.StartFeedback(f);
+            if (ScreenPartsOf(f).Count == 0) return guid;
             try
             {
-                foreach (var part in ScreenPartsOf(f))
-                    if (part.isActive) { part.SetActive(false); off.Add(part); }
+                var running = container.activeFeedbackInstances;
+                if (running == null) return guid;
+                string id = guid.ToString();
+                FeedbackInstance inst = null;
+                for (int k = running.Count - 1; k >= 0; k--)
+                    if (running[k] != null && running[k].guid.ToString() == id) { inst = running[k]; break; }
+                if (inst == null) return guid;
+                var unprepared = inst.unpreparedFeatures;
+                if (unprepared != null)
+                    for (int i = unprepared.Count - 1; i >= 0; i--)
+                        if (IsScreenPart(unprepared[i])) unprepared.RemoveAt(i);
+                var unstarted = inst.unstartedFeatures;
+                if (unstarted != null)
+                    for (int i = unstarted.Count - 1; i >= 0; i--)
+                        if (unstarted[i] != null && IsScreenPart(unstarted[i].feature)) unstarted.RemoveAt(i);
+                var active = inst.activeFeatures;
+                if (active != null)
+                {
+                    MotherBase.EntityFramework.Entity owner = null;
+                    try { owner = container.GetComponentInParent<MotherBase.EntityFramework.Entity>(); } catch { }
+                    for (int i = active.Count - 1; i >= 0; i--)
+                    {
+                        var part = active[i];
+                        if (part == null || !IsScreenPart(part.feature)) continue;
+                        try { part.OnStop(owner); } catch { }
+                        active.RemoveAt(i);
+                    }
+                }
             }
-            catch { }
-            try { return container.StartFeedback(f); }
-            finally { foreach (var part in off) { try { part.SetActive(true); } catch { } } }
+            catch (Exception e)
+            {
+                if (loggedDrops.Add("fail:" + f.name)) Plugin.Logger.LogWarning($"[Session] Could not leave out the screen parts of '{f.name}': {e.Message}");
+            }
+            return guid;
         }
 
         internal static int TargetOf(FeedbackContainer container)

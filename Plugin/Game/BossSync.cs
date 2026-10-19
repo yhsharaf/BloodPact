@@ -81,7 +81,7 @@ namespace RoseNet.Game
         }
 
         // The game's boss-fight objects in the loaded scenes, including inactive ones.
-        static IEnumerable<T> SceneObjects<T>() where T : Component
+        internal static IEnumerable<T> SceneObjects<T>() where T : Component
         {
             foreach (var o in Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.Of<T>()))
             {
@@ -259,9 +259,33 @@ namespace RoseNet.Game
             {
                 holding = false;
                 Plugin.Logger.LogInfo($"[Session] Arrived; free to move ({now - holdStart:0.0} s after the teleport).");
+                if (BossIntro.IsBossRoom(holdRoom) && GameAccess.CurrentRoomId() == holdRoom) EnterBossIntro(holdRoom, me);
                 return;
             }
             GameAccess.Pin(me, holdSpot);
+        }
+
+        // Pulled into a boss room by teleport, we skipped its entrance, whose zones start the boss's intro here
+        // (until then our copy of the boss stands in its intro pose and our fight never starts). Walk through
+        // them now, as if we had come in the normal way.
+        internal static void EnterBossIntro(string room, Entity me)
+        {
+            var fired = new List<string>();
+            foreach (var ct in SceneObjects<CutsceneTrigger>())
+            {
+                try
+                {
+                    var root = ct.transform;
+                    while (root.parent != null) root = root.parent;
+                    if (!room.EndsWith(root.name, StringComparison.Ordinal)) continue;
+                    var zone = ct._trigger;
+                    if (zone == null) continue;
+                    zone.onEntityEnter?.Invoke(me);
+                    fired.Add(zone.name);
+                }
+                catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Boss room entrance zone: {e.Message}"); }
+            }
+            Plugin.Logger.LogInfo($"[Session] Entered the boss room by teleport; walked through its entrance zones: {(fired.Count == 0 ? "none" : string.Join(", ", fired))}.");
         }
 
         // Our BossFight for the other player's fight, given our copy of their boss. False = not ready yet.
