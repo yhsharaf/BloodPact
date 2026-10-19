@@ -156,6 +156,8 @@ namespace RoseNet.Session
         // both players, and fights, holds and timers would stall. While a partner is connected, time keeps going
         // (the menu still opens; our own Rose just stands there). Only our "Fight together?" question stops it.
         bool loggedPause, buildSent;
+        string refuseReason;
+        float notConnectedSince = -1f;
 
         void KeepWorldRunning()
         {
@@ -585,7 +587,7 @@ namespace RoseNet.Session
         // ---- on-screen: name over the other Rose, a small status line, and the window title ----
 
         string remoteName = "";
-        GUIStyle nameStyle, nameShadow, statusStyle, noteStyle;
+        GUIStyle nameStyle, nameShadow, statusStyle, noteStyle, noteShadow;
         float nextTitle;
         bool guiFailed;
 
@@ -603,14 +605,24 @@ namespace RoseNet.Session
 
                 if (Settings.ShowStatus)
                     GUI.Label(new Rect(10, 4, 700, 22), StatusText(), statusStyle);
-                string warn = welcomed ? DebugReport.BuildWarning(remoteName) : null;
+                string warn = welcomed ? DebugReport.BuildWarning(remoteName) : ConnectionHint();
                 string note = DebugReport.Notice;
                 if (warn != null || note != null)
                 {
-                    if (noteStyle == null) { noteStyle = MakeStyle(14, FontStyle.Bold, TextAnchor.UpperLeft, new Color(1f, 0.8f, 0.3f)); noteStyle.wordWrap = true; }
-                    float y = 44;
-                    if (warn != null) { GUI.Label(new Rect(10, y, Screen.width - 20, 40), warn, noteStyle); y += 22; }
-                    if (note != null) GUI.Label(new Rect(10, y, Screen.width - 20, 40), note, noteStyle);
+                    if (noteStyle == null)
+                    {
+                        noteStyle = MakeStyle(15, FontStyle.Bold, TextAnchor.UpperLeft, new Color(1f, 0.82f, 0.35f)); noteStyle.wordWrap = true;
+                        noteShadow = MakeStyle(15, FontStyle.Bold, TextAnchor.UpperLeft, new Color(0f, 0f, 0f, 0.9f)); noteShadow.wordWrap = true;
+                    }
+                    float w = Mathf.Max(420f, Screen.width * 0.6f), y = 30;
+                    foreach (var text in new[] { warn, note })
+                    {
+                        if (text == null) continue;
+                        float h = noteStyle.CalcHeight(new GUIContent(text), w);
+                        GUI.Label(new Rect(12, y + 2, w, h), text, noteShadow);
+                        GUI.Label(new Rect(10, y, w, h), text, noteStyle);
+                        y += h + 6;
+                    }
                 }
 
                 if (welcomed)
@@ -663,11 +675,36 @@ namespace RoseNet.Session
             return s;
         }
 
+        // While we can't connect, say why if we can tell (shown under the status line).
+        string lastHint;
+
+        string ConnectionHint()
+        {
+            string hint = ConnectionHintText();
+            if (hint != lastHint)
+            {
+                lastHint = hint;
+                if (hint != null) Plugin.Logger.LogInfo($"[Session] Connection help shown: {hint}");
+            }
+            return hint;
+        }
+
+        string ConnectionHintText()
+        {
+            if (welcomed || refused) { notConnectedSince = -1f; return null; }
+            if (notConnectedSince < 0f) notConnectedSince = Time.unscaledTime;
+            if (Settings.Transport == TransportKind.Steam) return SteamTransport.Hint;
+            if (Time.unscaledTime - notConnectedSince < 20f) return null;
+            return Settings.Role == Role.Host
+                ? $"Waiting for the guest on port {Settings.UdpPort}. Give them your Tailscale address (100.x.y.z); if they can't reach you, allow the port in the firewall (see BLOOD PACT SETUP.txt)."
+                : $"No answer from the host at {Settings.UdpHostAddress}:{Settings.UdpPort}. Check the host's Tailscale address in the .cfg, that you're on the same tailnet, and that the host is in the game with Role = Host.";
+        }
+
         string StatusText()
         {
             string role = Settings.Role == Role.Host ? "Host" : "Guest";
             if (transport == null) return $"Blood Pact {role}: starting...";
-            if (refused) return $"Blood Pact {role}: refused by host (see log)";
+            if (refused) return $"Blood Pact {role}: the host refused the connection: {refuseReason}";
             if (!welcomed) return Settings.Role == Role.Host ? $"Blood Pact Host: waiting for a guest" : "Blood Pact Guest: looking for the host...";
             string where = haveRemote && puppet != null && !puppet.Visible ? " (in another room)" : "";
             return $"Blood Pact {role}: playing with {(string.IsNullOrEmpty(remoteName) ? "Player 2" : remoteName)}{where}   [{Plugin.Version} {DebugReport.BuildId}, F10 = bug report]";
@@ -844,6 +881,7 @@ namespace RoseNet.Session
                     else if (!refused)
                     {
                         refused = true;
+                        refuseReason = reason;
                         Plugin.Logger.LogError($"[Session] Host refused the connection: {reason}");
                     }
                     break;

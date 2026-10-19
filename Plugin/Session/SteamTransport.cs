@@ -62,6 +62,7 @@ namespace RoseNet.Session
             }
             else
             {
+                SteamAPI_ISteamFriends_SetRichPresence(friends, RichPresenceKey, "guest " + Plugin.Version);
                 Plugin.Logger.LogInfo($"[Session] Steam guest {selfId} looking for a host" +
                     (fixedHostId != 0 ? $" ({fixedHostId})." : " among friends playing the game."));
             }
@@ -70,12 +71,17 @@ namespace RoseNet.Session
         public void Tick()
         {
             SteamAPI_ISteamNetworkingSockets_RunCallbacks(sockets);
-            if (!isHost && connection == 0 && Stopwatch.GetTimestamp() >= nextSearch)
+            if (connection == 0 && Stopwatch.GetTimestamp() >= nextSearch)
             {
                 nextSearch = Stopwatch.GetTimestamp() + 3 * Stopwatch.Frequency;
-                var host = fixedHostId != 0 ? fixedHostId : FindHostingFriend();
-                if (host != 0) Connect(host);
+                var host = FindHostingFriend();   // also works out what to tell the player (Hint)
+                if (!isHost)
+                {
+                    if (fixedHostId != 0) host = fixedHostId;
+                    if (host != 0) Connect(host);
+                }
             }
+            else if (connection != 0) Hint = null;
         }
 
         public void Send(byte[] data, int length, bool reliable)
@@ -113,11 +119,8 @@ namespace RoseNet.Session
         {
             if (connection != 0) SteamAPI_ISteamNetworkingSockets_CloseConnection(sockets, connection, 0, "bye", false);
             if (listenSocket != 0) SteamAPI_ISteamNetworkingSockets_CloseListenSocket(sockets, listenSocket);
-            if (isHost)
-            {
-                SteamAPI_ISteamFriends_SetRichPresence(friends, RichPresenceKey, "");
-                SteamAPI_ISteamFriends_SetRichPresence(friends, "status", "");
-            }
+            SteamAPI_ISteamFriends_SetRichPresence(friends, RichPresenceKey, "");
+            if (isHost) SteamAPI_ISteamFriends_SetRichPresence(friends, "status", "");
         }
 
         void Connect(ulong host)
@@ -131,10 +134,15 @@ namespace RoseNet.Session
             Plugin.Logger.LogInfo($"[Session] Connecting to {FriendName(host)} over Steam...");
         }
 
+        // What's wrong, in words, while we can't connect (shown on screen). Null when there is nothing to say.
+        internal static string Hint;
+
         ulong FindHostingFriend()
         {
             const int Immediate = 4;
             int count = SteamAPI_ISteamFriends_GetFriendCount(friends, Immediate);
+            ulong found = 0;
+            string inGame = null, noMod = null, sameRole = null, otherVersion = null, otherVersionName = null;
             for (int i = 0; i < count; i++)
             {
                 ulong id = SteamAPI_ISteamFriends_GetFriendByIndex(friends, i, Immediate);
@@ -143,9 +151,30 @@ namespace RoseNet.Session
                 if ((info.GameId & 0xFFFFFF) != AppId) continue;
                 SteamAPI_ISteamFriends_RequestFriendRichPresence(friends, id);
                 var rp = Marshal.PtrToStringUTF8(SteamAPI_ISteamFriends_GetFriendRichPresence(friends, id, RichPresenceKey));
-                if (rp != null && rp.StartsWith("host")) return id;
+                string name = FriendName(id);
+                inGame ??= name;
+                if (string.IsNullOrEmpty(rp)) { noMod ??= name; continue; }
+                string role = rp.Split(' ')[0];
+                string version = rp.Length > role.Length ? rp.Substring(role.Length).Trim() : "";
+                if (role == (isHost ? "host" : "guest")) { sameRole ??= name; continue; }
+                if (version != "" && version != Plugin.Version) { otherVersion ??= version; otherVersionName ??= name; }
+                if (role == "host" && found == 0) found = id;
             }
-            return 0;
+            const string cfg = @"BepInEx\config\com.rosenet.tailscale.cfg";
+            if (!isHost && found != 0)
+                Hint = otherVersion != null ? $"{otherVersionName} hosts Blood Pact {otherVersion}, you have {Plugin.Version}: you both need the same version." : null;
+            else if (sameRole != null)
+                Hint = $"{sameRole} is also set as {(isHost ? "Host" : "Guest")}. One of you must be the Host and the other the Guest: change Role in {cfg} and restart the game.";
+            else if (otherVersion != null)
+                Hint = $"{otherVersionName} runs Blood Pact {otherVersion}, you have {Plugin.Version}: you both need the same version.";
+            else if (noMod != null)
+                Hint = $"{noMod} is playing, but Blood Pact isn't running for them. The mod's files must be right next to the game's .exe (not in a subfolder), and the first start takes a few minutes.";
+            else if (inGame == null)
+                Hint = isHost
+                    ? "No Steam friend is playing Castlevania: Belmont's Curse yet. Your partner must be on your Steam friends list, in the game, with Role = Guest."
+                    : "No Steam friend is hosting yet. The host must be on your Steam friends list, not set to Invisible, in the game with Role = Host and a save loaded.";
+            else Hint = null;
+            return found;
         }
 
         void OnStatusChanged(IntPtr info)
