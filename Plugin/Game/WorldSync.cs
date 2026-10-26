@@ -143,6 +143,53 @@ namespace RoseNet.Game
             catch { return "?"; }
         }
 
+        // Personal rewards: an object (not a chest) that drops experience or a pickable item when broken or taken
+        // (EXP statues, health/mana upgrades). Sharing its "broken/taken" state took it away from the other player
+        // without giving them anything, so each player's copy stays their own: both can break or take it.
+        static readonly Dictionary<IntPtr, string> personalCache = new Dictionary<IntPtr, string>();
+
+        internal static string PersonalReason(SavableEntityBase o, Entity entity)
+        {
+            if (o == null) return null;
+            if (personalCache.TryGetValue(o.Pointer, out var cached)) return cached;
+            string why = null;
+            try
+            {
+                var root = entity != null ? entity.gameObject : o.gameObject;
+                // Pickups that are the reward themselves: health/mana upgrades, stat books, food.
+                string n = o.name ?? "", rn = root.name ?? "";
+                if (n.StartsWith("GPE_UpgradeCollectible", StringComparison.Ordinal) || rn.StartsWith("GPE_UpgradeCollectible", StringComparison.Ordinal)) why = "upgrade";
+                else if (n.StartsWith("GPE_Consumable", StringComparison.Ordinal) || rn.StartsWith("GPE_Consumable", StringComparison.Ordinal)) why = "pickup";
+                if (why == null && root.GetComponentInChildren<ChestItemHolder>(true) == null)
+                {
+                    if (root.GetComponentInChildren<ExperienceHolder>(true) != null) why = "experience";
+                    foreach (var dropper in root.GetComponentsInChildren<LootDropper>(true))
+                    {
+                        if (why != null) break;
+                        var table = dropper != null ? dropper.lootTable : null;
+                        if (table == null) continue;
+                        if (table.guaranteedDrops != null)
+                            foreach (var d in table.guaranteedDrops) { why ??= LootKind(d); }
+                        if (why == null && table.randomLootEntries != null)
+                            foreach (var e in table.randomLootEntries) { why ??= LootKind(e.lootData); }
+                    }
+                }
+            }
+            catch { }
+            personalCache[o.Pointer] = why;
+            return why;
+        }
+
+        static string LootKind(LootData d)
+        {
+            if (d == null) return null;
+            if (d.TryCast<ExperienceLootData>() != null) return "experience";
+            if (d.TryCast<PickableItemLootData>() != null) return "item";
+            return null;
+        }
+
+        static readonly HashSet<string> personalLogged = new HashSet<string>();
+
         static void Scan()
         {
             // Same key on a different object = its room was reloaded: that counts as just loaded too.
@@ -159,6 +206,13 @@ namespace RoseNet.Game
                     var entity = o.GetComponentInParent<Entity>();
                     var ks = o.GetSaveKeyAndState(entity);
                     if (string.IsNullOrEmpty(ks.Item1)) continue;
+                    var personal = PersonalReason(o, entity);
+                    if (personal != null)
+                    {
+                        if (personalLogged.Add(ks.Item1) && personalLogged.Count <= 40)
+                            Plugin.Logger.LogInfo($"[WorldDiag] Not shared (each player gets their own {personal}): '{PathOf(o.transform)}'.");
+                        continue;
+                    }
                     var tr = new Tracked { Savable = o, Entity = entity, Kind = kind };
                     byKey[ks.Item1] = tr;
                     if (before.TryGetValue(ks.Item1, out var was) && was == o.Pointer) continue;

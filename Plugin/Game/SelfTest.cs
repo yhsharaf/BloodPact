@@ -46,6 +46,9 @@ namespace RoseNet.Game
         static string Dir => Path.Combine(BepInEx.Paths.BepInExRootPath, "BloodPact-test");
         static string Role => IsHost ? "host" : "guest";
         static string Other => IsHost ? "guest" : "host";
+        // --rosenet-test-guest-first: the guest walks into the boss room first (and so runs it), the host follows.
+        static bool GuestFirst => CommandLine.Value("rosenet-test-guest-first") != null;
+        static bool Lead => GuestFirst ? !IsHost : IsHost;
 
         static IEnumerator run;
         static Func<bool> waitFor;
@@ -444,6 +447,24 @@ namespace RoseNet.Game
                 yield return Seconds(2f);
             }
 
+            if (Scenario == "world-objects")
+            {
+                var wo = WorldObjects();
+                while (wo.MoveNext()) yield return wo.Current;
+                yield break;
+            }
+            if (Scenario == "statue")
+            {
+                var st = Statue();
+                while (st.MoveNext()) yield return st.Current;
+                yield break;
+            }
+            if (Scenario == "zombies")
+            {
+                var zo = Zombies();
+                while (zo.MoveNext()) yield return zo.Current;
+                yield break;
+            }
             if (Scenario == "monsters")
             {
                 var mo = Monsters();
@@ -792,6 +813,248 @@ namespace RoseNet.Game
             yield return Barrier("monsters-end", 60f);
         }
 
+        // ---- world objects: which ones are personal rewards (not shared) ----
+
+        static IEnumerator WorldObjects()
+        {
+            Log("=== world-objects ===");
+            yield return Seconds(3f);
+            var counts = new System.Collections.Generic.Dictionary<string, int>();
+            var seen = new System.Collections.Generic.HashSet<string>();
+            int personal = 0, shared = 0, visited = 0;
+            if (!IsHost) { yield return Until(() => HasFlag(Other, "world-objects"), 900f, "the host"); yield break; }
+            foreach (var r in Rooms())
+            {
+                if (visited++ >= 60) break;
+                var go = GoTo(r.Origin + new Vector3(r.Size.x * 0.5f, r.Size.y * 0.5f, 0f), r.Id, 10f);
+                while (go.MoveNext()) yield return go.Current;
+                yield return Seconds(1.5f);
+                foreach (var o in Object.FindObjectsOfType<SavableEntityBase>())
+                {
+                    string kind = null, why = null, name = null, key = null;
+                    try
+                    {
+                        var ent = o.GetComponentInParent<Entity>();
+                        key = o.GetSaveKeyAndState(ent).Item1;
+                        if (string.IsNullOrEmpty(key) || !seen.Add(key)) continue;
+                        kind = o.saveStateTranslator != null ? o.saveStateTranslator.GetIl2CppType().Name : "none";
+                        why = WorldSync.PersonalReason(o, ent);
+                        name = System.Text.RegularExpressions.Regex.Replace(o.name, @"\(Clone\)|[\s_]*\(?\d+\)?$", "");
+                    }
+                    catch { continue; }
+                    string k = kind.Replace("SavableStateTranslator", "") + " | " + name + " | " + (why ?? "shared");
+                    counts[k] = counts.TryGetValue(k, out var c) ? c + 1 : 1;
+                    if (why != null) personal++; else shared++;
+                }
+            }
+            Log("Rooms visited: " + visited + ".");
+            foreach (var kv in counts) Log("  " + kv.Value.ToString().PadLeft(3) + " x " + kv.Key);
+            Log("World objects loaded: " + personal + " personal rewards, " + shared + " shared.");
+            Check("world: personal rewards found", personal > 0, personal + " personal, " + shared + " shared");
+            Flag("world-objects");
+        }
+
+        // ---- zombies: a room whose spawner keeps adding monsters over time ----
+
+        static IEnumerator Zombies()
+        {
+            Log("=== zombies ===");
+            yield return Barrier("zombies-start");
+            string roomFile = Path.Combine(Dir, "zombie-room.txt");
+            if (IsHost)
+            {
+                // Rooms with a timer spawner (DensityMobSpawner): the spawner position tells the room.
+                var spots = new System.Collections.Generic.List<Vector3>();
+                foreach (var sp in BossSync.SceneObjects<DensityMobSpawner>()) { try { spots.Add(sp.transform.position); } catch { } }
+                Log("Timer spawners in this area: " + spots.Count + ".");
+                // Zombie spawners (most zombies come from ordinary spawners named after them).
+                foreach (var sp in BossSync.SceneObjects<BaseMobsSpawner>()) { try { if (sp.name.IndexOf("Zombie", StringComparison.OrdinalIgnoreCase) >= 0) spots.Add(sp.transform.position); } catch { } }
+                Log("Timer or zombie spawners: " + spots.Count + ".");
+                string found = null; Vector3 at = Vector3.zero;
+                foreach (var r in Rooms())
+                {
+                    if (r.Id.IndexOf("Boss", StringComparison.OrdinalIgnoreCase) >= 0 || r.Id.IndexOf("Save", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    var spot = r.Origin + new Vector3(r.Size.x * 0.5f, r.Size.y * 0.5f, 0f);
+                    var go = GoTo(spot, r.Id, 12f);
+                    while (go.MoveNext()) yield return go.Current;
+                    yield return Seconds(2.5f);
+                    if (Room != r.Id) continue;
+                    int zombies = 0;
+                    foreach (var (id, mob) in LiveMonsters()) if (MobRegistry.PrefabName(mob).IndexOf("Zombie", StringComparison.OrdinalIgnoreCase) >= 0) zombies++;
+                    if (zombies >= 2) { found = r.Id; at = spot; Log("Room " + r.Id + ": " + zombies + " zombies, " + LiveMonsters().Count + " monsters."); break; }
+                }
+                if (found != null && Me != null) at = Me.transform.position;
+                File.WriteAllText(roomFile, found == null ? "none" : found + "|" + S(at.x) + "|" + S(at.y));
+                Log(found == null ? "(no reachable room with a timer spawner)" : "Zombie room: " + found + ".");
+                Flag("zombie-room");
+                if (found == null) { yield return Barrier("zombies-end", 300f); yield break; }
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "zombie-room"), 600f, "the host to find a zombie room");
+                string[] f = File.ReadAllText(roomFile).Split('|');
+                if (f.Length < 3) { yield return Barrier("zombies-end", 300f); yield break; }
+                var go = GoTo(new Vector3(F(f[1]), F(f[2]) + 0.3f, 0f), f[0], 20f);
+                while (go.MoveNext()) yield return go.Current;
+            }
+            string zombieRoom = Room;
+            yield return Barrier("zombies-together", 120f);
+            // Both stand in the room for 90 s while the spawner works; every 10 s compare.
+            int worstMissing = 0, worstExtra = 0, worstFar = 0, rounds = 0, maxHost = 0;
+            for (int round = 0; round < 9; round++)
+            {
+                yield return Seconds(10f);
+                string listFile = Path.Combine(Dir, "zombies-" + round + ".txt");
+                if (IsHost)
+                {
+                    var lines = new System.Collections.Generic.List<string>();
+                    foreach (var (id, mob) in LiveMonsters()) lines.Add(id + "|" + S(mob.transform.position.x) + "|" + S(mob.transform.position.y) + "|" + MobRegistry.PrefabName(mob));
+                    File.WriteAllLines(listFile, lines);
+                    Log("Round " + round + ": " + lines.Count + " live monsters here.");
+                    Flag("zombies-" + round);
+                }
+                else
+                {
+                    int r0 = round;
+                    yield return Until(() => HasFlag(Other, "zombies-" + r0), 20f, "the host list");
+                    if (!File.Exists(listFile)) continue;
+                    yield return Seconds(0.5f);   // let the stream catch up with the host moment
+                    if (Room != zombieRoom) { Log("Round " + round + ": we left the zombie room (now " + Room + "); round skipped."); continue; }
+                    var hostIds = new System.Collections.Generic.HashSet<uint>();
+                    int missing = 0, far = 0, total = 0;
+                    var missingNames = new System.Collections.Generic.List<string>();
+                    foreach (var line in File.ReadAllLines(listFile))
+                    {
+                        var q = line.Split('|'); total++;
+                        if (!uint.TryParse(q[0], out var id)) continue;
+                        hostIds.Add(id);
+                        if (!MobRegistry.ById.TryGetValue(id, out var mob) || mob == null || !MobRegistry.IsAlive(mob) || mob.transform.position.y < -5000f) { missing++; missingNames.Add(q.Length > 3 ? q[3] : "?"); continue; }
+                        if (Vector2.Distance(new Vector2(F(q[1]), F(q[2])), mob.transform.position) > 4f) far++;
+                    }
+                    int extra = 0;
+                    var extraNames = new System.Collections.Generic.List<string>();
+                    foreach (var (id, mob) in LiveMonsters())
+                        if (!hostIds.Contains(id) && mob.transform.position.y > -5000f && Visible(mob))
+                        {
+                            extra++;
+                            extraNames.Add(MobRegistry.PrefabName(mob) + " #" + id + " at " + mob.transform.position.x.ToString("0.0") + "," + mob.transform.position.y.ToString("0.0") + (MobControl.IsPossessed(mob) ? " driven" : " own AI") + " hp " + (MobControl.DamageableOf(mob)?.currentHealth ?? -1));
+                        }
+                    rounds++; maxHost = Math.Max(maxHost, total);
+                    worstMissing = Math.Max(worstMissing, missing); worstExtra = Math.Max(worstExtra, extra); worstFar = Math.Max(worstFar, far);
+                    Log("Round " + round + ": host " + total + ", missing here " + missing + " [" + string.Join(", ", missingNames) + "], extra here " + extra + " [" + string.Join(", ", extraNames) + "], far " + far + ".");
+                }
+            }
+            if (!IsHost)
+            {
+                Check("zombies: every host monster shows here", rounds > 0 && worstMissing == 0, "worst round: " + worstMissing + " missing (host had up to " + maxHost + ")");
+                Check("zombies: no extra monsters only we see", rounds > 0 && worstExtra == 0, "worst round: " + worstExtra + " extra");
+                Check("zombies: in the same places", rounds > 0 && worstFar <= 1, "worst round: " + worstFar + " more than 4 units off");
+            }
+            yield return Barrier("zombies-end", 120f);
+        }
+
+        // ---- EXP statue: each player breaks their own and gets their own XP ----
+
+        static int Xp()
+        {
+            try
+            {
+                var xp = Me != null ? Me.GetComponent<ExperienceComponent>() : null;
+                return xp == null ? -1 : xp.GetLevel() * 1000000 + xp.GetExperienceCurrent();
+            }
+            catch { return -1; }
+        }
+
+        static ActivableEntity StatueAt(string path)
+        {
+            foreach (var act in BossSync.SceneObjects<ActivableEntity>())
+            {
+                try { if (PathOf(act.transform) == path) return act; } catch { }
+            }
+            return null;
+        }
+
+        static IEnumerator BreakStatue(ActivableEntity act, string who)
+        {
+            int before = Xp();
+            try
+            {
+                var ent = act.GetComponentInParent<Entity>() ?? act.GetComponentInChildren<Entity>(true);
+                var d = ent != null ? MobControl.DamageableOf(ent) : null;
+                var parts = new System.Collections.Generic.List<string>();
+                foreach (var c in act.GetComponentsInChildren<Component>(true)) { if (c != null && parts.Count < 30) parts.Add(c.GetIl2CppType().Name); }
+                Log("Statue parts: " + string.Join(", ", parts) + "; health " + (d != null ? d.currentHealth.ToString() : "none"));
+                if (d != null) { d.currentHealth = 0; d.Die(ent, Me, new DamageData()); }
+                else act.Activate(false);
+            }
+            catch (Exception e) { Log("(break: " + e.Message + ")"); }
+            yield return Until(() => Xp() != before, 12f, "the statue XP to reach " + who);
+            yield return Seconds(1f);
+            int after = Xp();
+            Check("statue: " + who + " gets XP from breaking it", after > before && before >= 0, "XP " + before + " -> " + after);
+        }
+
+        static IEnumerator Statue()
+        {
+            Log("=== statue ===");
+            yield return Barrier("statue-start");
+            string file = Path.Combine(Dir, "statue.txt");
+            if (IsHost)
+            {
+                string found = null, room = null; Vector3 at = Vector3.zero;
+                foreach (var r in Rooms())
+                {
+                    var go = GoTo(r.Origin + new Vector3(r.Size.x * 0.5f, r.Size.y * 0.5f, 0f), r.Id, 10f);
+                    while (go.MoveNext()) yield return go.Current;
+                    yield return Seconds(1.5f);
+                    foreach (var act in BossSync.SceneObjects<ActivableEntity>())
+                    {
+                        try
+                        {
+                            if (!act.isActiveAndEnabled || act.IsActivated() || !act.name.StartsWith("GPE_DestructibleSourceExperience", StringComparison.Ordinal)) continue;
+                            string path = PathOf(act.transform);
+                            if (!Room.EndsWith(path.Split('/')[0], StringComparison.Ordinal)) continue;
+                            found = path; room = Room; at = act.transform.position; break;
+                        }
+                        catch { }
+                    }
+                    if (found != null) break;
+                }
+                File.WriteAllText(file, found == null ? "none" : room + "|" + S(at.x) + "|" + S(at.y) + "|" + found);
+                Log(found == null ? "(no unbroken EXP statue found)" : "Statue: " + found + ".");
+                Flag("statue-found");
+                if (found == null) { yield return Barrier("statue-end", 300f); yield break; }
+                var go2 = GoTo(at + new Vector3(1.5f, 0.5f, 0f), room, 10f);
+                while (go2.MoveNext()) yield return go2.Current;
+                yield return Barrier("statue-together", 120f);
+                var mine = StatueAt(found);
+                if (mine == null) Log("FAIL statue: lost the statue");
+                else { var b = BreakStatue(mine, "host"); while (b.MoveNext()) yield return b.Current; }
+                Flag("statue-broken");
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "statue-found"), 900f, "the host to find a statue");
+                string[] f = File.ReadAllText(file).Split('|');
+                if (f.Length < 4) { yield return Barrier("statue-end", 300f); yield break; }
+                var go = GoTo(new Vector3(F(f[1]) - 1.5f, F(f[2]) + 0.5f, 0f), f[0], 20f);
+                while (go.MoveNext()) yield return go.Current;
+                yield return Barrier("statue-together", 120f);
+                yield return Until(() => HasFlag(Other, "statue-broken"), 60f, "the host to break it");
+                yield return Seconds(3f);
+                var mine = StatueAt(f[3]);
+                Check("statue: still standing for the guest after the host broke theirs", mine != null && mine.isActiveAndEnabled && !mine.IsActivated(), mine == null ? "not found" : "activated " + mine.IsActivated());
+                if (mine != null && !mine.IsActivated()) { var b = BreakStatue(mine, "guest"); while (b.MoveNext()) yield return b.Current; }
+            }
+            yield return Barrier("statue-end", 120f);
+        }
+
+        static bool Visible(Entity mob)
+        {
+            try { foreach (var r in mob.GetComponentsInChildren<Renderer>()) if (r.enabled && r.gameObject.activeInHierarchy) return true; } catch { }
+            return false;
+        }
+
         static int InventoryCount()
         {
             try { var inv = Me?.GetComponent<InventoryComponent>()?.inventory; return inv?._itemsInInventory?.Count ?? -1; } catch { return -1; }
@@ -888,8 +1151,9 @@ namespace RoseNet.Game
                 yield return Seconds(2f);
             }
 
-            // The host walks into the arena first (it runs the room) and calls the guest (auto "yes").
-            if (IsHost)
+            // The lead (host, or guest with --rosenet-test-guest-first) walks into the arena first (it runs the
+            // room) and calls the other player (auto "yes").
+            if (Lead)
             {
                 var go = GoTo(LeonArena, LeonRoom);
                 while (go.MoveNext()) yield return go.Current;
@@ -908,7 +1172,7 @@ namespace RoseNet.Game
             }
             Stick(0);
             // Teleporting in skips the arena entrance, where walking through its trigger starts the fight.
-            if (IsHost)
+            if (Lead)
             {
                 int n2 = 0;
                 foreach (var trig in BossSync.SceneObjects<BossFightTrigger>())

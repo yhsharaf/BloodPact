@@ -1379,6 +1379,7 @@ namespace RoseNet.Session
                 && !string.IsNullOrEmpty(remote.RoomId) && remote.RoomId == GameAccess.CurrentRoomId();
             DebugReport.Send = (buf, len) => { if (transport != null) transport.Send(buf, len, true); };
             RestSync.Connected = () => welcomed;
+            MobRegistry.Replaced = m => mobMirror?.OnReplaced(m);
             SelfTest.IsHost = Settings.Role == Role.Host;
             SelfTest.Connected = () => welcomed && haveRemote;
             SelfTest.PartnerDead = () => remoteDead;

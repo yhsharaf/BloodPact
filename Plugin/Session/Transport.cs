@@ -54,11 +54,40 @@ namespace RoseNet.Session
             }
         }
 
-        public void Tick() { }
+        // Self-test only: --rosenet-test-lag <ms one way> and --rosenet-test-loss <percent of unreliable messages>,
+        // to play two copies on one PC as if over a real internet connection (Steam: reliable ones always arrive).
+        static readonly int lagMs = int.TryParse(CommandLine.Value("rosenet-test-lag"), out var l) ? l : 0;
+        static readonly int lossPercent = int.TryParse(CommandLine.Value("rosenet-test-loss"), out var lp) ? lp : 0;
+        readonly System.Collections.Generic.Queue<(long at, byte[] data)> delayed = new System.Collections.Generic.Queue<(long, byte[])>();
+        readonly Random rng = new Random();
+        long lastDue;
+
+        public void Tick()
+        {
+            if (delayed.Count == 0 || peer == null) return;
+            long now = Stopwatch.GetTimestamp();
+            while (delayed.Count > 0 && delayed.Peek().at <= now)
+            {
+                var d = delayed.Dequeue();
+                try { socket.SendTo(d.data, 0, d.data.Length, SocketFlags.None, peer); } catch (SocketException) { }
+            }
+        }
 
         public void Send(byte[] data, int length, bool reliable)
         {
             if (peer == null) return;
+            if (lagMs > 0 || lossPercent > 0)
+            {
+                if (!reliable && lossPercent > 0 && rng.Next(100) < lossPercent) return;
+                double jitter = lagMs * (0.8 + 0.4 * rng.NextDouble());
+                long due = Stopwatch.GetTimestamp() + (long)(jitter / 1000.0 * Stopwatch.Frequency);
+                if (due < lastDue) due = lastDue;   // keep the order
+                lastDue = due;
+                var copy = new byte[length];
+                Buffer.BlockCopy(data, 0, copy, 0, length);
+                delayed.Enqueue((due, copy));
+                return;
+            }
             try { socket.SendTo(data, 0, length, SocketFlags.None, peer); } catch (SocketException) { }
         }
 

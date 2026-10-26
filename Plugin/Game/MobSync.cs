@@ -97,12 +97,20 @@ namespace RoseNet.Game
             spawnCounts[spawner.Pointer] = ++n;
             var key = SpawnerKey(spawner);
             uint id = Hash(key + "#" + n);
-            if (ById.TryGetValue(id, out var old) && old != null) IdOf.Remove(old.Pointer);
+            if (ById.TryGetValue(id, out var old) && old != null)
+            {
+                IdOf.Remove(old.Pointer);
+                if (old.Pointer != mob.Pointer) { try { Replaced?.Invoke(old); } catch { } }
+            }
             ById[id] = mob;
             IdOf[mob.Pointer] = id;
             int slash = key.IndexOf('/');
             roomOf[id] = slash > 0 ? key.Substring(0, slash) : key;
         }
+
+        // Our own spawner just made the monster we had created as a stand-in for the owner's (it was missing when
+        // we arrived): the stand-in must go, or it stays in the room as a frozen copy next to the real one.
+        internal static Action<Entity> Replaced;
 
         // Monsters RoseNet created itself to match the room owner (they have no spawner here).
         public static void RegisterMirror(uint id, Entity mob, string roomId)
@@ -1082,6 +1090,17 @@ namespace RoseNet.Game
         }
 
         readonly Dictionary<IntPtr, Vector3> hiddenFrom = new Dictionary<IntPtr, Vector3>();
+
+        public void OnReplaced(Entity standIn)
+        {
+            if (standIn == null || !created.Remove(standIn.Pointer)) return;
+            try
+            {
+                Hide(standIn);
+                if (spawnLogs-- > 0) Plugin.Logger.LogInfo($"[Session] Our own '{MobRegistry.PrefabName(standIn)}' spawned; removed the stand-in we had made for it.");
+            }
+            catch { }
+        }
 
         public void ShowAgain(Entity mob)
         {
