@@ -1,3 +1,7 @@
+* Version 0.2.4
+   * EXP statues are now per player: each player breaks their own and gets their own EXP
+   * Stat items (health and mana upgrades, attack and defence books, food) are now per player: each player picks up their own
+   * Fixed a bug that could leave a frozen copy of a monster in the room for the second player
 * Version 0.2.3
    * Fixed a bug that caused bosses to stand still after the player who entered the fight first died
    * Fixed a bug that could cause Agnes to freeze mid-dash after a player died

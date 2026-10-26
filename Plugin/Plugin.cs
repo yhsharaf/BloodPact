@@ -31,7 +31,7 @@ namespace RoseNet
     public class Plugin : BasePlugin
     {
         public const string Guid = "com.rosenet.tailscale";
-        public const string Version = "0.2.3";
+        public const string Version = "0.2.4";
 
         internal static ManualLogSource Logger;
         internal static UdpHost Host;
