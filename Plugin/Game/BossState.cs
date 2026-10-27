@@ -12,47 +12,69 @@ namespace RoseNet.Game
     // carries on in the right phase (a boss left in an old phase finds no move allowed and stands still).
     internal static class BossState
     {
-        sealed class Kind { public Type Type; public Il2CppSystem.Type Il2Cpp; public PropertyInfo[] Fields; }
+        sealed class Kind { public Type Type; public PropertyInfo[] Fields; }
 
-        static List<Kind> kinds;
+        // Kinds by the component's game type name; null = not a state we copy. Looked up one type at a time, only
+        // for the components a boss actually has. (Scanning every type of the game's assembly up front crashed
+        // the .NET runtime itself on some PCs: "Internal CLR error" the moment a boss spawned, GitHub issue #1.)
+        static readonly Dictionary<string, Kind> kinds = new Dictionary<string, Kind>();
         static int logs = 10;
 
-        // Every MonoBehaviour type of the game named ...State / ...StateComponent with simple fields (bosses' states).
-        static List<Kind> Kinds()
+        static Kind KindOf(Component c)
         {
-            if (kinds != null) return kinds;
-            kinds = new List<Kind>();
+            string name;
+            try { name = c.GetIl2CppType().Name; } catch { return null; }
+            if (kinds.TryGetValue(name, out var known)) return known;
+            Kind kind = null;
             try
             {
-                foreach (var t in typeof(LeonState).Assembly.GetTypes())
+                if ((name.EndsWith("State") || name.EndsWith("StateComponent")) && name != "AIStateComponent"
+                    && !name.StartsWith("Character") && !name.StartsWith("Player"))
                 {
-                    if (!t.IsSubclassOf(typeof(MonoBehaviour)) || t.IsAbstract) continue;
-                    if (!(t.Name.EndsWith("State") || t.Name.EndsWith("StateComponent"))) continue;
-                    if (t.Name == "AIStateComponent" || t.Name.StartsWith("Character") || t.Name.StartsWith("Player")) continue;
-                    var fields = new List<PropertyInfo>();
-                    foreach (var p in t.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly))
+                    string full = c.GetIl2CppType().FullName;
+                    var asm = typeof(LeonState).Assembly;
+                    var t = asm.GetType(full, false) ?? asm.GetType("Il2Cpp" + full, false) ?? asm.GetType(name, false);
+                    if (t != null && !t.IsAbstract)
                     {
-                        var pt = p.PropertyType;
-                        if (!p.CanRead || !p.CanWrite) continue;
-                        if (pt == typeof(int) || pt == typeof(bool) || pt == typeof(float) || pt.IsEnum) fields.Add(p);
+                        var fields = new List<PropertyInfo>();
+                        foreach (var p in t.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly))
+                        {
+                            var pt = p.PropertyType;
+                            if (!p.CanRead || !p.CanWrite) continue;
+                            if (pt == typeof(int) || pt == typeof(bool) || pt == typeof(float) || pt.IsEnum) fields.Add(p);
+                        }
+                        if (fields.Count > 0) kind = new Kind { Type = t, Fields = fields.ToArray() };
                     }
-                    if (fields.Count == 0) continue;
-                    Il2CppSystem.Type il2 = null;
-                    try { il2 = Il2CppInterop.Runtime.Il2CppType.From(t); } catch { }
-                    if (il2 != null) kinds.Add(new Kind { Type = t, Il2Cpp = il2, Fields = fields.ToArray() });
                 }
             }
-            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Boss states: {e.Message}"); }
-            return kinds;
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Boss state '{name}': {e.Message}"); }
+            kinds[name] = kind;
+            return kind;
         }
 
-        static IEnumerable<(Kind kind, object state)> StatesOf(Entity boss)
+        // A boss's state components don't change during a fight: find them once per boss.
+        static readonly Dictionary<int, List<(Kind kind, object state)>> statesOf = new Dictionary<int, List<(Kind, object)>>();   // by instance id (never reused, unlike a pointer)
+
+        static List<(Kind kind, object state)> StatesOf(Entity boss)
         {
-            foreach (var k in Kinds())
+            int key = boss.GetInstanceID();
+            if (statesOf.TryGetValue(key, out var cached)) return cached;
+            var list = new List<(Kind, object)>();
+            foreach (var ks in FindStates(boss)) list.Add(ks);
+            statesOf[key] = list;
+            return list;
+        }
+
+        static IEnumerable<(Kind kind, object state)> FindStates(Entity boss)
+        {
+            Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppArrayBase<MonoBehaviour> parts = null;
+            try { parts = boss.gameObject.GetComponentsInChildren<MonoBehaviour>(true); } catch { }
+            if (parts == null) yield break;
+            foreach (var c in parts)
             {
-                Component c = null;
-                try { c = boss.gameObject.GetComponentInChildren(k.Il2Cpp, true); } catch { }
                 if (c == null) continue;
+                var k = KindOf(c);
+                if (k == null) continue;
                 object state = null;
                 try { state = Activator.CreateInstance(k.Type, c.Pointer); } catch { }
                 if (state != null) yield return (k, state);
@@ -139,6 +161,6 @@ namespace RoseNet.Game
             }
         }
 
-        public static void Forget() => lastSent.Clear();
+        public static void Forget() { lastSent.Clear(); statesOf.Clear(); }
     }
 }

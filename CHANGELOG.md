@@ -1,3 +1,5 @@
+* Version 0.2.6
+   * Fixed a crash for the host when a boss appeared while playing together (first reported at Leon)
 * Version 0.2.5
    * Fixed a bug that caused drawbridges to be raised for one player and lowered for the other
 * Version 0.2.4
