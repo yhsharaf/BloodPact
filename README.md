@@ -16,15 +16,10 @@
 
 ---
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/two-players.jpg" alt="Two players in the same room"><br><sub>Each player sees the other's Rose, named and tinted.</sub></td>
-    <td width="50%"><img src="docs/images/boss-fight.jpg" alt="Fighting a boss together"><br><sub>Boss fights together, with a shared win and reward.</sub></td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/images/shared-monsters.jpg" alt="Shared monsters"><br><sub>The same monsters, in the same places, for both players.</sub></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/images/two-players.jpg" alt="Two players in the same room" width="100%"><br>
+  <sub>Each player sees the other's Rose, named and tinted.</sub>
+</p>
 
 ## Features
 
