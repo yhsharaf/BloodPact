@@ -1,11 +1,12 @@
-# RoseNet 0.1: Online Co-op over Tailscale (input layer)
+# Remote controller mode (optional, with RoseCoop)
 
-RoseNet sends your friend's controller over Tailscale into **your** game. RoseCoop then sees it as
-an extra local controller, so your friend joins as player 2, 3 or 4 just as if the pad were plugged into your PC.
-Your friend watches the game through a stream (see step 3).
+An optional extra, separate from Blood Pact's normal online co-op (where each player runs their own game).
+In this mode your friend's controller is sent over Tailscale into **your** game. The local co-op mod RoseCoop
+then sees it as an extra local controller, so your friend joins as player 2, 3 or 4 just as if the pad were
+plugged into your PC. Your friend watches the game through a stream (see step 3).
 
-> This is milestone 1. Your friend's own copy of the game isn't used yet. Letting each of you run
-> your own copy is the next milestone (see `..\NETCODE_FEASIBILITY.md`).
+> This was Blood Pact's first approach, before each player could run their own copy of the game. Most
+> players want the normal online co-op described in the README instead.
 
 ## What goes where
 
