@@ -1,3 +1,5 @@
+* Version 0.2.5
+   * Fixed a bug that caused drawbridges to be raised for one player and lowered for the other
 * Version 0.2.4
    * EXP statues are now per player: each player breaks their own and gets their own EXP
    * Stat items (health and mana upgrades, attack and defence books, food) are now per player: each player picks up their own

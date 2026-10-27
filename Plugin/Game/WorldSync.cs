@@ -224,7 +224,7 @@ namespace RoseNet.Game
                         var chest = ChestOf(tr);
                         if (chest != null) Plugin.Logger.LogInfo($"[Session] Chest '{o.name}' (opened by the other player) is here now{GiveChestItem(chest, ks.Item1)}.");
                     }
-                    if (pending.TryGetValue(ks.Item1, out var c)) { pending.Remove(ks.Item1); ApplyLive(tr, c); }
+                    if (pending.TryGetValue(ks.Item1, out var c)) { pending.Remove(ks.Item1); ApplyLive(tr, c, justLoaded: true); }
                     lastSeen[ks.Item1] = o.GetSaveKeyAndState(entity).Item2 ?? "";
                 }
                 catch { }
@@ -296,7 +296,14 @@ namespace RoseNet.Game
             ApplyLive(tr, c);
         }
 
-        static void ApplyLive(Tracked tr, Change c)
+        static bool AngleIndexIn(string state, out int index)
+        {
+            index = 0;
+            var m = System.Text.RegularExpressions.Regex.Match(state ?? "", @"""angleIndex""\s*:\s*(-?\d+)");
+            return m.Success && int.TryParse(m.Groups[1].Value, out index);
+        }
+
+        static void ApplyLive(Tracked tr, Change c, bool justLoaded = false)
         {
             try
             {
@@ -318,6 +325,19 @@ namespace RoseNet.Game
                     tr.Savable.LoadSaveState(tr.Entity, c.State);
                     if (logs-- > 0) Plugin.Logger.LogInfo($"[Session] The other player opened chest '{tr.Savable.name}'; marked opened here{live}.");
                     return;
+                }
+                // A drawbridge (or other turning platform): its saved angle only says how it starts next time its
+                // room loads. Turn it for real, the game's own way, so it lowers/raises here as it did for them.
+                var rot = tr.Savable.GetComponentInParent<GPE_AngleRotation>() ?? tr.Savable.GetComponentInChildren<GPE_AngleRotation>(true);
+                if (rot != null && AngleIndexIn(c.State, out int angle))
+                {
+                    if (rot._currentAngleIndex != angle && rot._targetAngleIndex != angle)
+                    {
+                        // Just loaded (they turned it while we were elsewhere): it is simply in place.
+                        if (justLoaded) rot.InstantSetAngleIndex(angle); else rot.GoToAngle(angle);
+                        if (detailLogs-- > 0) Plugin.Logger.LogInfo($"[WorldDiag] The other player turned '{PathOf(tr.Savable.transform)}' to position {angle}; turning it here too.");
+                    }
+                    return;   // its saved state follows once it has turned (and isn't sent back: same value)
                 }
                 if (act != null && ActivatedIn(c.State, out bool on))
                 {

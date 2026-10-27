@@ -32,6 +32,7 @@ foreach ($sc in $scenarios) {
     if ($GuestFirst) { $common += " --rosenet-test-guest-first 1" }
     if ($Lag -gt 0) { $common += " --rosenet-test-lag $Lag" }
     if ($Loss -gt 0) { $common += " --rosenet-test-loss $Loss" }
+    $snap = Start-Process -FilePath "powershell" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSScriptRoot\snapwatch.ps1`" -Dir `"$testDir`"" -WindowStyle Hidden -PassThru
     Start-Process -FilePath $exe -WorkingDirectory $Game -ArgumentList "--rosenet-role host $common"
     Start-Sleep -Seconds 8
     Start-Process -FilePath $exe -WorkingDirectory $Game -ArgumentList "--rosenet-role guest $common"
@@ -58,6 +59,8 @@ foreach ($sc in $scenarios) {
     foreach ($l in "LogOutput.log", "LogOutput.1.log") {
         Copy-Item (Join-Path $Game "BepInEx\$l") (Join-Path $logDir "$tag-$l") -Force -ErrorAction SilentlyContinue
     }
+    if ($snap) { Stop-Process -Id $snap.Id -Force -ErrorAction SilentlyContinue }
+    Get-ChildItem $testDir -Filter "*.png" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName (Join-Path $logDir "$tag-$($_.Name)") -Force }
 }
 $all | ForEach-Object { Write-Host $_ }
 $summary = Join-Path $Game "BepInEx\BloodPact-test-summary.txt"

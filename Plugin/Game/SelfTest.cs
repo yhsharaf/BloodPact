@@ -453,6 +453,18 @@ namespace RoseNet.Game
                 while (wo.MoveNext()) yield return wo.Current;
                 yield break;
             }
+            if (Scenario == "bridges")
+            {
+                var br = Bridges();
+                while (br.MoveNext()) yield return br.Current;
+                yield break;
+            }
+            if (Scenario == "doors")
+            {
+                var dr = Doors();
+                while (dr.MoveNext()) yield return dr.Current;
+                yield break;
+            }
             if (Scenario == "statue")
             {
                 var st = Statue();
@@ -1047,6 +1059,203 @@ namespace RoseNet.Game
                 if (mine != null && !mine.IsActivated()) { var b = BreakStatue(mine, "guest"); while (b.MoveNext()) yield return b.Current; }
             }
             yield return Barrier("statue-end", 120f);
+        }
+
+        // ---- screenshots of our window, taken by tools/snapwatch.ps1 ----
+
+        static int lastSnap = -1;
+        static IEnumerator Snap(string name)
+        {
+            string req = Path.Combine(Dir, Role + "-snap-" + name + ".req"), res = Path.Combine(Dir, Role + "-snap-" + name + ".res");
+            try { File.Delete(res); File.WriteAllText(req, ""); } catch { }
+            yield return Until(() => File.Exists(res), 15f, "the screenshot " + name);
+            lastSnap = -1;
+            try { if (File.Exists(res)) lastSnap = int.Parse(File.ReadAllText(res).Trim()); } catch { }
+            Log("Screen '" + name + "': brightness " + lastSnap + ", state " + StateName() + ", room " + Room + ".");
+        }
+
+        // ---- doors: one player goes through a door; the other screen must not go (and stay) black ----
+
+        static string DescribeBridge(Component b)
+        {
+            var parts = new System.Collections.Generic.List<string>();
+            try { foreach (var c in b.GetComponentsInChildren<Component>(true)) { if (c != null && parts.Count < 24) { var n = c.GetIl2CppType().Name; if (n != "Transform" && !n.EndsWith("Renderer") && n != "MeshFilter" && !parts.Contains(n)) parts.Add(n); } } } catch { }
+            string sav = "";
+            try
+            {
+                var se = b.GetComponentInParent<SavableEntityBase>() ?? b.GetComponentInChildren<SavableEntityBase>(true);
+                if (se != null) sav = (se.saveStateTranslator != null ? se.saveStateTranslator.GetIl2CppType().Name : "?") + " = " + se.GetSaveKeyAndState(se.GetComponentInParent<Entity>()).Item2;
+            }
+            catch { }
+            return PathOf(b.transform) + " [" + sav + "] parts: " + string.Join(", ", parts);
+        }
+
+        static IEnumerator Doors()
+        {
+            Log("=== doors ===");
+            yield return Barrier("doors-start");
+            string file = Path.Combine(Dir, "doors.txt");
+            if (IsHost)
+            {
+                // Every (non fast-travel) door of the area: room, where to stand, its path, what kind of door.
+                var lines = new System.Collections.Generic.List<string>();
+                var seen = new System.Collections.Generic.HashSet<string>();
+                foreach (var r in Rooms())
+                {
+                    if (lines.Count >= 5) break;
+                    var go = GoTo(r.Origin + new Vector3(r.Size.x * 0.5f, r.Size.y * 0.5f, 0f), r.Id, 10f);
+                    while (go.MoveNext()) yield return go.Current;
+                    yield return Seconds(1.5f);
+                    foreach (var z in BossSync.SceneObjects<ZDoorEntrance>())
+                    {
+                        try
+                        {
+                            if (!z.isActiveAndEnabled || z.isFastTravelZDoor) continue;
+                            string path = PathOf(z.transform);
+                            if (!Room.EndsWith(path.Split('/')[0], StringComparison.Ordinal) || !seen.Add(path)) continue;
+                            var at = z.transform.position;
+                            lines.Add(Room + "|" + S(at.x) + "|" + S(at.y) + "|" + path + "|" + (z.isTpDoor ? "tp " + z.tpDoorType : "z") + "|" + z.gameObject.name);
+                            if (lines.Count >= 5) break;
+                        }
+                        catch { }
+                    }
+                }
+                File.WriteAllLines(file, lines);
+                Log("Doors to try: " + lines.Count + ".");
+                Flag("doors-listed");
+            }
+            else yield return Until(() => HasFlag(Other, "doors-listed"), 900f, "the host to list doors");
+            string[] doors = File.Exists(file) ? File.ReadAllLines(file) : new string[0];
+            for (int i = 0; i < doors.Length; i++)
+            {
+                var f = doors[i].Split('|');
+                Vector3 at = new Vector3(F(f[1]), F(f[2]) + 0.3f, 0f);
+                var go = GoTo(IsHost ? at : at + new Vector3(-1.5f, 0f, 0f), f[0], 15f);
+                while (go.MoveNext()) yield return go.Current;
+                yield return Barrier("door" + i + "-ready", 60f);
+                yield return Seconds(2f);
+                if (IsHost)
+                {
+                    yield return Until(() => HasFlag(Other, "door" + i + "-before"), 30f, "the guest's screenshot");
+                    ZDoorEntrance door = null;
+                    foreach (var z in BossSync.SceneObjects<ZDoorEntrance>()) { try { if (PathOf(z.transform) == f[3]) door = z; } catch { } }
+                    if (door == null) Log("(door " + i + " not found here)");
+                    else { try { door.OnPlayerInteract(Me); } catch (Exception e) { Log("(door: " + e.Message + ")"); } }
+                    yield return Seconds(6f);
+                    Log("Door " + i + " (" + f[4] + ", " + f[5] + "): we went from " + f[0] + " to " + Room + ".");
+                    Flag("door" + i + "-entered");
+                    yield return Until(() => HasFlag(Other, "door" + i + "-done"), 60f, "the guest's screenshots");
+                }
+                else
+                {
+                    var s0 = Snap("door" + i + "-before"); while (s0.MoveNext()) yield return s0.Current;
+                    int before = lastSnap;
+                    Flag("door" + i + "-before");
+                    yield return Until(() => HasFlag(Other, "door" + i + "-entered"), 40f, "the host to go through");
+                    yield return Seconds(4f);
+                    var s1 = Snap("door" + i + "-after"); while (s1.MoveNext()) yield return s1.Current;
+                    Check("doors: screen not black after the partner used door " + i + " (" + f[4] + ", " + f[5] + ")", before > 0 && lastSnap >= Math.Max(8, before / 2), "brightness before " + before + ", after " + lastSnap + "; we are in " + Room + ", state " + StateName());
+                    Flag("door" + i + "-done");
+                }
+            }
+            yield return Barrier("doors-end", 120f);
+        }
+
+        // ---- drawbridges: one player turns it, the other sees it turn too ----
+
+        static GPE_AngleRotation BridgeAt(string path)
+        {
+            foreach (var b in BossSync.SceneObjects<GPE_DrawBridgeComponent>())
+            {
+                try { if (PathOf(b.transform) == path) return b.GetComponent<GPE_AngleRotation>() ?? b.GetComponentInParent<GPE_AngleRotation>(); } catch { }
+            }
+            return null;
+        }
+
+        static string BridgePose(GPE_AngleRotation r)
+        {
+            try { var t = r._rotatingTransform != null ? r._rotatingTransform : r.transform; return "index " + r._currentAngleIndex + ", angle " + t.eulerAngles.z.ToString("0") + "/" + t.eulerAngles.x.ToString("0") + "/" + t.eulerAngles.y.ToString("0"); }
+            catch (Exception e) { return "? " + e.Message; }
+        }
+
+        static float BridgeAngle(GPE_AngleRotation r)
+        {
+            try { var t = r._rotatingTransform != null ? r._rotatingTransform : r.transform; return t.rotation.eulerAngles.z + t.rotation.eulerAngles.x * 1000f + t.rotation.eulerAngles.y * 1000000f; } catch { return float.NaN; }
+        }
+
+        static IEnumerator Bridges()
+        {
+            Log("=== bridges ===");
+            yield return Barrier("bridges-start");
+            string file = Path.Combine(Dir, "bridge.txt");
+            if (IsHost)
+            {
+                string found = null, room = null; Vector3 at = Vector3.zero;
+                foreach (var r in Rooms())
+                {
+                    var go = GoTo(r.Origin + new Vector3(r.Size.x * 0.5f, r.Size.y * 0.5f, 0f), r.Id, 10f);
+                    while (go.MoveNext()) yield return go.Current;
+                    yield return Seconds(1.5f);
+                    foreach (var b in BossSync.SceneObjects<GPE_DrawBridgeComponent>())
+                    {
+                        try
+                        {
+                            if (!b.isActiveAndEnabled) continue;
+                            string path = PathOf(b.transform);
+                            if (!Room.EndsWith(path.Split('/')[0], StringComparison.Ordinal)) continue;
+                            found = path; room = Room; at = Me.transform.position; break;
+                        }
+                        catch { }
+                    }
+                    if (found != null) break;
+                }
+                File.WriteAllText(file, found == null ? "none" : room + "|" + S(at.x) + "|" + S(at.y) + "|" + found);
+                Log(found == null ? "(no drawbridge found)" : "Drawbridge: " + found + ".");
+                Flag("bridge-found");
+                if (found == null) { yield return Barrier("bridges-end", 300f); yield break; }
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "bridge-found"), 900f, "the host to find a drawbridge");
+                string[] f0 = File.ReadAllText(file).Split('|');
+                if (f0.Length < 4) { yield return Barrier("bridges-end", 300f); yield break; }
+                var go = GoTo(new Vector3(F(f0[1]), F(f0[2]) + 0.3f, 0f), f0[0], 20f);
+                while (go.MoveNext()) yield return go.Current;
+            }
+            yield return Barrier("bridges-together", 120f);
+            yield return Seconds(3f);
+            string[] f = File.ReadAllText(file).Split('|');
+            string bpath = f[3];
+            // Two turns: the host turns it, then the guest turns it back.
+            for (int turn = 0; turn < 2; turn++)
+            {
+                bool iTurn = (turn == 0) == IsHost;
+                var mine = BridgeAt(bpath);
+                if (mine == null) { Log("FAIL bridges: no bridge here"); break; }
+                if (iTurn)
+                {
+                    Log("Before turn " + turn + ": " + BridgePose(mine));
+                    try { mine.GoToNextAngle(); } catch (Exception e) { Log("(turn: " + e.Message + ")"); }
+                    yield return Seconds(6f);
+                    Log("After turn " + turn + " (we turned it): " + BridgePose(mine));
+                    File.WriteAllText(Path.Combine(Dir, "bridge-turn" + turn + ".txt"), mine._currentAngleIndex + "|" + S(BridgeAngle(mine)));
+                    Flag("bridge-turned" + turn);
+                }
+                else
+                {
+                    int t0 = turn;
+                    yield return Until(() => HasFlag(Other, "bridge-turned" + t0), 30f, "the other player to turn it");
+                    yield return Seconds(2f);
+                    string[] g = File.ReadAllText(Path.Combine(Dir, "bridge-turn" + turn + ".txt")).Split('|');
+                    int idx = int.Parse(g[0]);
+                    Log("After turn " + turn + " (the other player turned it): " + BridgePose(mine) + "; theirs is at index " + idx + ".");
+                    Check("bridges: turn " + turn + " shows here (" + (IsHost ? "guest" : "host") + " turned it)", mine._currentAngleIndex == idx && Mathf.Abs(BridgeAngle(mine) - F(g[1])) < 2f, BridgePose(mine) + " vs theirs index " + idx);
+                    Flag("bridge-checked" + turn);
+                }
+                yield return Until(() => HasFlag(Other, "bridge-checked" + turn) || HasFlag(Role, "bridge-checked" + turn), 40f, "the check");
+                yield return Seconds(1f);
+            }
+            yield return Barrier("bridges-end", 120f);
         }
 
         static bool Visible(Entity mob)
