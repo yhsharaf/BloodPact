@@ -16,11 +16,6 @@
 
 ---
 
-<p align="center">
-  <img src="docs/images/two-players.jpg" alt="Two players in the same room" width="100%"><br>
-  <sub>Each player sees the other's Rose, named and tinted.</sub>
-</p>
-
 ## Features
 
 - **Play together online.** Each player runs their own game and save; Blood Pact keeps both worlds in step.
@@ -44,6 +39,13 @@ You need the game (**1.1.3**, Steam) and both players on the **same Blood Pact v
 
 Be Steam friends; the host loads their save first, then the guest. No IP or port needed.
 [Tailscale](https://tailscale.com) works as a backup.
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/images/two-players.jpg" alt="Two players in the same room" width="100%"><br>
+  <sub>Each player sees the other's Rose, named and tinted.</sub>
+</p>
 
 ## Reporting a bug
 
