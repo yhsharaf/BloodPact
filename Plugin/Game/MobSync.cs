@@ -39,7 +39,6 @@ namespace RoseNet.Game
     internal static class MobRegistry
     {
         static readonly Dictionary<IntPtr, int> spawnCounts = new Dictionary<IntPtr, int>();
-        static readonly Dictionary<IntPtr, string> spawnerKeys = new Dictionary<IntPtr, string>();
         internal static readonly Dictionary<uint, Entity> ById = new Dictionary<uint, Entity>();
         internal static readonly Dictionary<IntPtr, uint> IdOf = new Dictionary<IntPtr, uint>();
         static readonly Dictionary<uint, string> roomOf = new Dictionary<uint, string>();   // room object name, e.g. "StreetsPoorV2_Room43_uid136"
@@ -51,6 +50,8 @@ namespace RoseNet.Game
             return !string.IsNullOrEmpty(roomId) && roomOf.TryGetValue(id, out var r) && !string.IsNullOrEmpty(r)
                 && roomId.EndsWith(r, StringComparison.Ordinal);
         }
+
+        internal static string RoomOf(uint id) => roomOf.TryGetValue(id, out var r) ? r : "?";
 
         // Any monster (alive or not) registered in this room: "a monster room".
         public static bool AnyIn(string roomId)
@@ -141,14 +142,14 @@ namespace RoseNet.Game
 
         internal static string SpawnerKey(BaseMobsSpawner spawner)
         {
-            if (spawnerKeys.TryGetValue(spawner.Pointer, out var key)) return key;
+            // Worked out every time, never remembered by pointer: when a room unloads, a new spawner can get the
+            // old one's address, and its monsters were then filed under the wrong room (not streamed, not matched
+            // between the two games, and a locked-room fight that could never end).
             var sb = new StringBuilder();
             for (var t = spawner.transform; t != null; t = t.parent)
                 sb.Insert(0, sb.Length == 0 ? t.name : t.name + "/");
             var p = spawner.transform.position;
-            key = string.Format(CultureInfo.InvariantCulture, "{0}@({1:0.0},{2:0.0},{3:0.0})", sb, p.x, p.y, p.z);
-            spawnerKeys[spawner.Pointer] = key;
-            return key;
+            return string.Format(CultureInfo.InvariantCulture, "{0}@({1:0.0},{2:0.0},{3:0.0})", sb, p.x, p.y, p.z);
         }
 
         public static uint Hash(string s)
@@ -1157,6 +1158,34 @@ namespace RoseNet.Game
             inStream.Clear();
             failedSpawns.Clear();
             Active = false;
+        }
+
+        // We took over a locked-room fight: monsters we had hidden (gone from the owner's world, or spawned here
+        // before the owner's stream caught up) still count as alive for our gate, which would never open. They
+        // really die now, out of sight.
+        public void FinishHidden(string roomId)
+        {
+            int n = 0;
+            var me = GameAccess.MainCharacter();
+            foreach (var kv in new List<KeyValuePair<uint, Entity>>(MobRegistry.ById))
+            {
+                var mob = kv.Value;
+                if (mob == null || !MobRegistry.InRoom(kv.Key, roomId) || !hidden.Contains(mob.Pointer) || !MobRegistry.IsAlive(mob)) continue;
+                try
+                {
+                    var d = MobControl.DamageableOf(mob);
+                    hidden.Remove(mob.Pointer);
+                    MobControl.Possessed.Remove(mob.Pointer);
+                    if (d == null) continue;
+                    MobControl.AllowDeath = true;
+                    d.currentHealth = 0;
+                    d.Die(mob, me, new DamageData());
+                    n++;
+                }
+                catch { }
+                finally { MobControl.AllowDeath = false; }
+            }
+            if (n > 0) Plugin.Logger.LogInfo($"[Session] Took over a locked-room fight: {n} hidden monster(s) finished so its gate can open.");
         }
 
         public void OnRoomChanged()

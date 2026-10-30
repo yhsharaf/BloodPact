@@ -261,7 +261,10 @@ namespace RoseNet.Game
             return false;
         }
 
-        static bool ShouldWatch() => WeAreDead() && PartnerFighting() && BossAliveHere();
+        // A fight we can watch: a living boss here, or a locked-room fight still going.
+        static bool FightHere() => BossAliveHere() || EncounterSync.ActiveHere();
+
+        static bool ShouldWatch() => WeAreDead() && PartnerFighting() && FightHere();
 
         // A state load the game wants to do. True = let it happen now.
         internal static bool Allow(string what, Action replay)
@@ -286,7 +289,7 @@ namespace RoseNet.Game
             heldWhat = what;
             since = Time.unscaledTime;
             BossIntro.Banner = "You fell. Watching your partner fight...";
-            Plugin.Logger.LogInfo($"[Session] We fell in the boss fight; spectating instead of '{what}' for now.");
+            Plugin.Logger.LogInfo($"[Session] We fell in the fight; spectating instead of '{what}' for now.");
             return false;
         }
 
@@ -302,7 +305,7 @@ namespace RoseNet.Game
             var go = held;
             held = null;
             RespawningUntil = Time.unscaledTime + 10f;
-            BossIntro.CallOver("Your partner won! Go back to the boss room for your reward.");
+            BossIntro.CallOver(BossIntro.IsBossRoom(GameAccess.CurrentRoomId()) ? "Your partner won! Go back to the boss room for your reward." : "Your partner won the fight!");
             Plugin.Logger.LogInfo($"[Session] The other player won while we were down; '{heldWhat}' goes ahead (respawn), the boss falls for us when we are back in its room.");
             try { Replaying = true; go(); }
             catch (Exception e) { Plugin.Logger.LogWarning($"[Session] Could not respawn after the win: {e.Message}"); }
@@ -424,7 +427,7 @@ namespace RoseNet.Game
         {
             if (held == null) return;
             // The boss is gone while our partner is still here and standing: they won.
-            if (WeAreDead() && ((PartnerFighting() && !BossAliveHere()) || Victory.Beaten(GameAccess.CurrentRoomId()))) { OnVictory(); return; }
+            if (WeAreDead() && ((PartnerFighting() && !FightHere()) || Victory.Beaten(GameAccess.CurrentRoomId()))) { OnVictory(); return; }
             if (ShouldWatch() && Time.unscaledTime - since < 300f) return;
             var go = held;
             held = null;

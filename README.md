@@ -22,6 +22,7 @@
 - **See each other.** Your partner's Rose is fully animated, with their attacks, spells and effects.
 - **Fight together.** Shared monsters that hit and can be hit by both players, and go after whoever is closer.
 - **Boss fights.** "Fight together?" brings your partner in. Fall, and you watch; win, and the reward is yours too.
+- **Locked-room fights.** Shared waves for both players. Fall, and you watch your partner finish it.
 - **Shared world.** Doors, levers, gates and drawbridges move for both. Chest items reach your partner anywhere.
 - **Your own rewards.** EXP statues, upgrades, stat books and food: each player gets their own.
 - **Shared resting.** Rest at a mirror and the monsters respawn for both, Souls style.
@@ -50,7 +51,8 @@ Be Steam friends; the host loads their save first, then the guest. No IP or port
 ## Reporting a bug
 
 Press **F10** right after it happens (either player). Open an issue with what happened, your versions, and the
-folder it made in `BepInEx\BloodPact-reports` (both players' logs).
+folder it made in `BepInEx\BloodPact-reports` (both players' logs). Restarted already? Your last 5 sessions are
+in `BepInEx\BloodPact-logs`.
 
 <details>
 <summary><b>Settings</b></summary>
@@ -97,7 +99,8 @@ powershell -ExecutionPolicy Bypass -File tools\selftest.ps1 -Scenario all -Slot 
 ```
 
 Scenarios: `both-up-win`, `partner-down-win`, `owner-down-win` (pick the boss with `-Boss`/`-Level`),
-`monsters`, `zombies`, `chest`, `statue`, `bridges`, `doors`. Options: `-GuestFirst`, `-Lag <ms>`, `-Loss <%>`.
+`encounter` (who dies: `-Encounter owner|partner|none`), `monsters`, `zombies`, `chest`, `statue`, `bridges`,
+`doors`, `leave`, `fall`. Options: `-GuestFirst`, `-Lag <ms>`, `-Loss <%>`.
 Don't touch the game windows while it runs; logs go to `BepInEx\BloodPact-test-logs`.
 </details>
 

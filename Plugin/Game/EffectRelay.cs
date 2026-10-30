@@ -126,6 +126,10 @@ namespace RoseNet.Game
         // running copy (the effect asset itself is shared with our own Rose and is never changed).
         public static Il2CppSystem.Guid StartBodyOnly(FeedbackContainer container, Feedback f)
         {
+            // A fade to or from black acts the moment the effect starts, before it can be taken out: the other
+            // player falling into water or a trap blacked out our screen for a moment. Such effects aren't started.
+            foreach (var part in ScreenPartsOf(f))
+                if (part.GetIl2CppType().Name.StartsWith("Fade", StringComparison.Ordinal)) return Il2CppSystem.Guid.Empty;
             var guid = container.StartFeedback(f);
             if (ScreenPartsOf(f).Count == 0) return guid;
             try

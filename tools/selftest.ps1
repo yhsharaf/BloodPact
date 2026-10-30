@@ -10,6 +10,8 @@ param(
     [switch]$GuestFirst,
     [int]$Lag = 0,
     [int]$Loss = 0,
+    [string]$Encounter = "",
+    [string]$SkipRoom = "",
     [string]$Game = "C:\Program Files (x86)\Steam\steamapps\common\Castlevania Belmont's Curse"
 )
 
@@ -32,6 +34,8 @@ foreach ($sc in $scenarios) {
     if ($GuestFirst) { $common += " --rosenet-test-guest-first 1" }
     if ($Lag -gt 0) { $common += " --rosenet-test-lag $Lag" }
     if ($Loss -gt 0) { $common += " --rosenet-test-loss $Loss" }
+    if ($Encounter -ne "") { $common += " --rosenet-test-encounter $Encounter" }
+    if ($SkipRoom -ne "") { $common += " --rosenet-test-skip $SkipRoom" }
     $snap = Start-Process -FilePath "powershell" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSScriptRoot\snapwatch.ps1`" -Dir `"$testDir`"" -WindowStyle Hidden -PassThru
     Start-Process -FilePath $exe -WorkingDirectory $Game -ArgumentList "--rosenet-role host $common"
     Start-Sleep -Seconds 8
@@ -55,7 +59,7 @@ foreach ($sc in $scenarios) {
     # Keep both games' logs of this run (the next run overwrites them).
     $logDir = Join-Path $Game "BepInEx\BloodPact-test-logs"
     New-Item -ItemType Directory -Force $logDir | Out-Null
-    $tag = if ($Boss -ne "") { "$Boss-$sc" } else { $sc }; if ($GuestFirst) { $tag += "-guestfirst" }; if ($Lag -gt 0) { $tag += "-lag$Lag" }
+    $tag = if ($Boss -ne "") { "$Boss-$sc" } else { $sc }; if ($GuestFirst) { $tag += "-guestfirst" }; if ($Lag -gt 0) { $tag += "-lag$Lag" }; if ($Encounter -ne "") { $tag += "-$Encounter" }
     foreach ($l in "LogOutput.log", "LogOutput.1.log") {
         Copy-Item (Join-Path $Game "BepInEx\$l") (Join-Path $logDir "$tag-$l") -Force -ErrorAction SilentlyContinue
     }

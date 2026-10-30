@@ -38,6 +38,7 @@ namespace RoseNet.Session
         LogChunk = 29,   // a piece of the sender's compressed log
         ChestLoot = 30,  // the sender opened a chest: its save key and the ids of the items in it
         BossState = 31,  // room owner: a boss's own fight state (phase...), as name=value pairs
+        EncounterOn = 32, // the sender's locked-room fight is running: room, gate
         BossStart = 21,  // the sender set off a boss encounter: room, trigger key, where they stand (pull the partner in)
     }
 

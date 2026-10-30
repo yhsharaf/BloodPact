@@ -256,6 +256,7 @@ namespace RoseNet.Session
                 describedMobs.Clear();
                 mobMirror.Release(healthWasScaled: true);
                 Plugin.Logger.LogInfo("[Session] We run this room's monsters now (the other player fell).");
+                try { if (EncounterSync.ActiveHere()) mobMirror.FinishHidden(trackedRoom); } catch { }
                 var took = new System.Collections.Generic.List<Entity>(mobMirror.Released);
                 try
                 {
@@ -317,6 +318,15 @@ namespace RoseNet.Session
                 transport.Send(writer.Buffer, writer.Length, true);
             }
             WorldSync.OutgoingLoot.Clear();
+            EncounterSync.Tick();
+            foreach (var (room, gate) in EncounterSync.Outgoing)
+            {
+                var we = writer.Begin(MsgType.EncounterOn);
+                we.Write(room);
+                we.Write(gate);
+                transport.Send(writer.Buffer, writer.Length, true);
+            }
+            EncounterSync.Outgoing.Clear();
             var list = WorldSync.Outgoing;
             if (list.Count == 0) return;
             foreach (var c in list)
@@ -639,6 +649,7 @@ namespace RoseNet.Session
             try { BossState.Forget(); } catch { }
             try { RestSync.Forget(); } catch { }
             try { BossSync.Forget(); } catch { }
+            try { EncounterSync.Forget(); } catch { }
             Victory.Outgoing.Clear();
         }
 
@@ -1160,6 +1171,9 @@ namespace RoseNet.Session
                     if (!iOwnRoom && room == trackedRoom && MobRegistry.ById.TryGetValue(id, out var boss)) BossState.Apply(boss, snap);
                     break;
                 }
+                case MsgType.EncounterOn when welcomed:
+                    EncounterSync.OnRemote(r.ReadString(), r.ReadString());
+                    break;
                 case MsgType.ChestLoot when welcomed:
                 {
                     string key = r.ReadString();

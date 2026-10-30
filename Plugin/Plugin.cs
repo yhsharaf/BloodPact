@@ -31,7 +31,7 @@ namespace RoseNet
     public class Plugin : BasePlugin
     {
         public const string Guid = "com.rosenet.tailscale";
-        public const string Version = "0.2.6";
+        public const string Version = "0.2.7";
 
         internal static ManualLogSource Logger;
         internal static UdpHost Host;
@@ -41,6 +41,7 @@ namespace RoseNet
         public override void Load()
         {
             Logger = Log;
+            Session.SessionLog.Start();
 
             var enabled = Config.Bind("Network", "Enabled", true,
                 "Listen for guest controllers. Turn off to play purely locally.");

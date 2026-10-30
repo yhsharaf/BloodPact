@@ -15,14 +15,16 @@ namespace RoseNet.Game
     {
         internal struct Change { public string Key, Kind, State; }
 
-        // Kinds of saved objects that are shared. Monster spawners have their own sync, boss triggers and
-        // encounter gates follow fights, dialogue isn't world state.
+        // Kinds of saved objects that are shared. Monster spawners have their own sync, boss triggers follow
+        // fights, dialogue isn't world state. Locked-room gates: running fights go through EncounterSync; here
+        // only "this fight is finished", so it doesn't start again for the other player.
         static readonly HashSet<string> SharedKinds = new HashSet<string>
         {
             "DoorSavableStateTranslator", "ZDoorSavableStateTranslator", "ActivableSavableStateTranslator",
             "AngleRotationSavableStateTranslator", "GradualStateSavableStateTranslator",
             "StateMachineSavableStateTranslator", "WaterMillSavableStateTranslator",
             "MammonBlockerSavableStateTranslator", "ResetableSecretZoneSavableStateTranslator",
+            "EncounterGateStateTranslator",
         };
 
         internal static readonly List<Change> Outgoing = new List<Change>();
@@ -225,6 +227,8 @@ namespace RoseNet.Game
                         if (chest != null) Plugin.Logger.LogInfo($"[Session] Chest '{o.name}' (opened by the other player) is here now{GiveChestItem(chest, ks.Item1)}.");
                     }
                     if (pending.TryGetValue(ks.Item1, out var c)) { pending.Remove(ks.Item1); ApplyLive(tr, c, justLoaded: true); }
+                    else if (kind == "EncounterGateStateTranslator" && finishedGates.Contains(ks.Item1) && !GateFinished(ks.Item2))
+                        ApplyLive(tr, new Change { Key = ks.Item1, Kind = kind, State = "{\"isComplete\":true}" }, justLoaded: true);
                     lastSeen[ks.Item1] = o.GetSaveKeyAndState(entity).Item2 ?? "";
                 }
                 catch { }
@@ -248,6 +252,13 @@ namespace RoseNet.Game
                     if (tr.Savable == null) continue;
                     var ks = tr.Savable.GetSaveKeyAndState(tr.Entity);
                     string state = ks.Item2 ?? "";
+                    // A finished fight: its saved state only follows when the game's end action is over (a talk can
+                    // hold that up), and the other player mustn't start it again meanwhile.
+                    if (tr.Kind == "EncounterGateStateTranslator" && !GateFinished(state))
+                    {
+                        var gate = tr.Savable.GetComponentInParent<GPE_EncounterGateComponent>() ?? tr.Savable.GetComponentInChildren<GPE_EncounterGateComponent>(true);
+                        if (gate != null && gate.IsDone) state = "{\"isComplete\":true}";
+                    }
                     if (lastSeen.TryGetValue(kv.Key, out var was) && was == state) continue;
                     lastSeen[kv.Key] = state;
                     if (resting) continue;   // a rest resets things in bulk; the rest sync covers that
@@ -258,6 +269,7 @@ namespace RoseNet.Game
                         var giver = ChestOf(tr);
                         if (giver != null) { var ids = ItemsIn(giver); if (ids.Length > 0) { givenKeys.Add(kv.Key); OutgoingLoot.Add((kv.Key, ids)); } }
                     }
+                    if (tr.Kind == "EncounterGateStateTranslator" && !GateFinished(state)) continue;
                     Outgoing.Add(new Change { Key = kv.Key, Kind = tr.Kind, State = state });
                     if (!tr.Savable.name.StartsWith("GPE_DestructibleProp", StringComparison.Ordinal) && detailLogs-- > 0)
                         Plugin.Logger.LogInfo($"[WorldDiag] Changed here: {Short(tr.Kind)} '{PathOf(tr.Savable.transform)}' = {state}; parts: {Parts(tr)}");
@@ -271,6 +283,7 @@ namespace RoseNet.Game
         public static void Apply(Change c)
         {
             if (string.IsNullOrEmpty(c.Key) || !SharedKinds.Contains(c.Kind ?? "")) return;
+            if (c.Kind == "EncounterGateStateTranslator") finishedGates.Add(c.Key);
             lastSeen[c.Key] = c.State;   // so we don't send it back
             try
             {
@@ -295,6 +308,12 @@ namespace RoseNet.Game
             }
             ApplyLive(tr, c);
         }
+
+        // Fights the other player finished this session. A respawn reloads the level from before that news, so
+        // the gate is marked finished again whenever its room loads; otherwise the fight would start again here.
+        static readonly HashSet<string> finishedGates = new HashSet<string>();
+
+        static bool GateFinished(string state) => (state ?? "").IndexOf("\"isComplete\":true", StringComparison.OrdinalIgnoreCase) >= 0;
 
         static bool AngleIndexIn(string state, out int index)
         {
@@ -324,6 +343,12 @@ namespace RoseNet.Game
                     }
                     tr.Savable.LoadSaveState(tr.Entity, c.State);
                     if (logs-- > 0) Plugin.Logger.LogInfo($"[Session] The other player opened chest '{tr.Savable.name}'; marked opened here{live}.");
+                    return;
+                }
+                if (c.Kind == "EncounterGateStateTranslator")
+                {
+                    tr.Savable.LoadSaveState(tr.Entity, c.State);
+                    EncounterSync.OnFinished(tr.Savable, tr.Entity);
                     return;
                 }
                 // A drawbridge (or other turning platform): its saved angle only says how it starts next time its

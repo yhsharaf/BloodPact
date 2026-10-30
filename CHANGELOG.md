@@ -1,3 +1,10 @@
+* Version 0.2.7
+   * Locked-room fights are now shared: the fight starts for both players, and each wave spawns for both
+   * If you die in a locked-room fight you now watch your partner finish it, like in boss fights
+   * A finished locked-room fight stays finished for both players and no longer restarts for one of them
+   * Fixed a bug that filed monsters under the wrong room, which could make enemies go out of sync, vanish or show up for only one player
+   * Fixed a bug where your partner falling into water or a trap blacked out your screen for a moment
+   * Each game session now keeps its own log in BepInEx\BloodPact-logs (the last 5), so restarting no longer erases it
 * Version 0.2.6
    * Fixed a crash for the host when a boss appeared while playing together (first reported at Leon)
 * Version 0.2.5

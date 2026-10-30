@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.IO;
 using MotherBase.EntityFramework;
@@ -451,6 +451,24 @@ namespace RoseNet.Game
             {
                 var wo = WorldObjects();
                 while (wo.MoveNext()) yield return wo.Current;
+                yield break;
+            }
+            if (Scenario == "leave")
+            {
+                var lv = Leave();
+                while (lv.MoveNext()) yield return lv.Current;
+                yield break;
+            }
+            if (Scenario == "fall")
+            {
+                var fl = Fall();
+                while (fl.MoveNext()) yield return fl.Current;
+                yield break;
+            }
+            if (Scenario == "encounter")
+            {
+                var en = Encounter();
+                while (en.MoveNext()) yield return en.Current;
                 yield break;
             }
             if (Scenario == "bridges")
@@ -1256,6 +1274,280 @@ namespace RoseNet.Game
                 yield return Seconds(1f);
             }
             yield return Barrier("bridges-end", 120f);
+        }
+
+        // ---- the host leaves a room: the guest who stays must keep seeing it ----
+
+        static IEnumerator Leave()
+        {
+            Log("=== leave ===");
+            yield return Barrier("leave-start");
+            var rooms = Rooms();
+            int tried = 0;
+            for (int i = 0; i < rooms.Count && tried < 8; i += Math.Max(1, rooms.Count / 8))
+            {
+                var r = rooms[i];
+                if (r.Id.IndexOf("Boss", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                tried++;
+                var other = rooms[(i + rooms.Count / 2) % rooms.Count];
+                var spot = r.Origin + new Vector3(r.Size.x * 0.5f, r.Size.y * 0.5f, 0f);
+                var go = GoTo(spot, r.Id, 12f);
+                while (go.MoveNext()) yield return go.Current;
+                yield return Barrier("leave-" + i + "-here", 40f);
+                yield return Seconds(3f);
+                if (IsHost)
+                {
+                    yield return Until(() => HasFlag(Other, "leave-" + i + "-before"), 25f, "the guest's screenshot");
+                    var away = GoTo(other.Origin + new Vector3(other.Size.x * 0.5f, other.Size.y * 0.5f, 0f), other.Id, 12f);
+                    while (away.MoveNext()) yield return away.Current;
+                    Flag("leave-" + i + "-gone");
+                    yield return Until(() => HasFlag(Other, "leave-" + i + "-done"), 30f, "the guest's second screenshot");
+                }
+                else
+                {
+                    var s0 = Snap("leave" + i + "-before"); while (s0.MoveNext()) yield return s0.Current;
+                    int before = lastSnap;
+                    Flag("leave-" + i + "-before");
+                    yield return Until(() => HasFlag(Other, "leave-" + i + "-gone"), 25f, "the host to leave");
+                    yield return Seconds(4f);
+                    var s1 = Snap("leave" + i + "-after"); while (s1.MoveNext()) yield return s1.Current;
+                    if (Room == r.Id) Check("leave: room still visible after the partner left " + r.Id, before <= 3 || lastSnap >= before / 2, "brightness " + before + " -> " + lastSnap);
+                    else Log("(we left " + r.Id + " during the check)");
+                    Flag("leave-" + i + "-done");
+                }
+                yield return Barrier("leave-" + i + "-end", 40f);
+            }
+            yield return Barrier("leave-end", 60f);
+        }
+
+        // ---- the host falls to its death pit move: the guest's screen must not change ----
+
+        static IEnumerator Fall()
+        {
+            Log("=== fall ===");
+            yield return Barrier("fall-start");
+            MotherBase.ActionFramework.ActionData fall = null;
+            var names = new System.Collections.Generic.List<string>();
+            foreach (var o in Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.Of<MotherBase.ActionFramework.ActionData>()))
+            {
+                var d = o.TryCast<MotherBase.ActionFramework.ActionData>();
+                if (d == null || d.actionFeatures == null) continue;
+                foreach (var ft in d.actionFeatures)
+                    if (ft != null && ft.GetIl2CppType().Name == "FatalFallRespawn") { names.Add(d.name); if (fall == null || d.name.StartsWith("MC")) fall = d; }
+            }
+            Log("Fatal fall moves: " + string.Join(", ", names));
+            yield return Seconds(4f);
+            if (!IsHost)
+            {
+                var s0 = Snap("fall-before"); while (s0.MoveNext()) yield return s0.Current;
+                int before = lastSnap;
+                Flag("fall-ready");
+                yield return Until(() => HasFlag(Other, "fall-now"), 30f, "the host to fall");
+                int lowest = 999;
+                for (int i = 0; i < 6; i++)
+                {
+                    yield return Seconds(0.5f);
+                    var s1 = Snap("fall-" + i); while (s1.MoveNext()) yield return s1.Current;
+                    if (lastSnap >= 0) lowest = Math.Min(lowest, lastSnap);
+                }
+                Check("fall: partner's fall doesn't darken our screen", before > 0 && lowest >= before * 0.7f, "brightness before " + before + ", lowest after " + lowest);
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "fall-ready"), 30f, "the guest");
+                if (fall == null) Log("(no fatal fall move found)");
+                else { try { var actor = Me.GetComponent<MotherBase.ActionFramework.Actor>(); MobControl.AllowStart = true; actor.StartAction(Me, fall); Log("Falling: " + fall.name); } catch (Exception e) { Log("(fall: " + e.Message + ")"); } finally { MobControl.AllowStart = false; } }
+                Flag("fall-now");
+                yield return Seconds(8f);
+            }
+            yield return Barrier("fall-end", 60f);
+        }
+
+        // ---- locked-room fights: start one together, one player dies, the other must be able to finish it ----
+
+        static GPE_EncounterGateComponent GateAt(string path)
+        {
+            foreach (var g in BossSync.SceneObjects<GPE_EncounterGateComponent>())
+            {
+                try { if (PathOf(g.transform) == path) return g; } catch { }
+            }
+            return null;
+        }
+
+        static string GateStatus(GPE_EncounterGateComponent g)
+        {
+            int live = 0, seen = 0;
+            foreach (var (id, mob) in LiveMonsters()) { live++; if (mob.transform.position.y > -5000f && Visible(mob)) seen++; }
+            string gate = "no gate";
+            try { if (g != null) gate = "active " + g.isEncounterActive + ", first spawn " + g.firstSpawnDone + ", done " + g.IsDone; } catch { }
+            return gate + "; monsters " + live + " alive, " + seen + " visible; we run the room " + OwnRoom() + "; alive " + Alive() + "; " + StateName() + " in " + Room;
+        }
+
+        static void HitAllMonsters()
+        {
+            foreach (var (id, mob) in LiveMonsters())
+            {
+                try
+                {
+                    if (mob.transform.position.y < -5000f || !Visible(mob)) continue;   // waves still waiting their turn
+                    var d = MobControl.DamageableOf(mob);
+                    if (d == null) continue;
+                    if (MobControl.IsPossessed(mob)) MobControl.OutgoingHits.Add((id, d.currentHealth + 1));
+                    else { d.currentHealth = 0; d.Die(mob, Me, new DamageData()); }
+                }
+                catch { }
+            }
+        }
+
+        static IEnumerator Encounter()
+        {
+            string who = CommandLine.Value("rosenet-test-encounter") ?? "none";   // who dies: owner, partner or none
+            Log("=== encounter (dies: " + who + ") ===");
+            yield return Barrier("enc-start");
+            string file = Path.Combine(Dir, "gate.txt");
+            if (IsHost)
+            {
+                string found = null, room = null; Vector3 at = Vector3.zero;
+                // A room with a story talk freezes that game's fight until someone presses: --rosenet-test-skip skips it.
+                string skip = CommandLine.Value("rosenet-test-skip");
+                foreach (var r in Rooms())
+                {
+                    if (r.Id.IndexOf("Boss", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    if (skip != null && r.Id.IndexOf(skip, StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    var go = GoTo(r.Origin + new Vector3(r.Size.x * 0.5f, r.Size.y * 0.5f, 0f), r.Id, 10f);
+                    while (go.MoveNext()) yield return go.Current;
+                    yield return Seconds(1.5f);
+                    foreach (var g in BossSync.SceneObjects<GPE_EncounterGateComponent>())
+                    {
+                        try
+                        {
+                            if (!g.isActiveAndEnabled || g.IsDone) continue;
+                            string path = PathOf(g.transform);
+                            if (!Room.EndsWith(path.Split('/')[0], StringComparison.Ordinal)) continue;
+                            found = path; room = Room;
+                            at = g.encounterGatesTrigger != null ? g.encounterGatesTrigger.transform.position : g.transform.position;
+                            Log("Gate " + path + ": " + (g.firstSpawners != null ? g.firstSpawners.Count : -1) + " first spawners, " + (g.customSpawners != null ? g.customSpawners.Count : -1) + " other spawners.");
+                            break;
+                        }
+                        catch (Exception e) { Log("(gate: " + e.Message + ")"); }
+                    }
+                    if (found != null) break;
+                }
+                File.WriteAllText(file, found == null ? "none" : room + "|" + S(at.x) + "|" + S(at.y) + "|" + found);
+                Log(found == null ? "(no unfinished locked-room fight found)" : "Fight in " + room + ".");
+                Flag("gate-found");
+                if (found == null) { yield return Barrier("enc-end", 300f); yield break; }
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "gate-found"), 900f, "the host to find a fight");
+                if (File.ReadAllText(file).StartsWith("none")) { yield return Barrier("enc-end", 300f); yield break; }
+            }
+            string[] f = File.ReadAllText(file).Split('|');
+            var spot = new Vector3(F(f[1]), F(f[2]) + 0.3f, 0f);
+            // The guest stands exactly where the host ended up: next to it may be a drop out of the room.
+            string standFile = Path.Combine(Dir, "gate-stand.txt");
+            if (IsHost)
+            {
+                var goIn = GoTo(spot, f[0], 20f);
+                while (goIn.MoveNext()) yield return goIn.Current;
+                yield return Seconds(2f);
+                spot = Me.transform.position + new Vector3(0f, 0.3f, 0f);
+                File.WriteAllText(standFile, S(spot.x) + "|" + S(spot.y));
+                Flag("gate-stand");
+            }
+            else
+            {
+                yield return Until(() => HasFlag(Other, "gate-stand"), 40f, "the host to settle");
+                var st = File.ReadAllText(standFile).Split('|');
+                spot = new Vector3(F(st[0]), F(st[1]), 0f);
+                var goIn = GoTo(spot, f[0], 20f);
+                while (goIn.MoveNext()) yield return goIn.Current;
+            }
+            yield return Barrier("enc-together", 120f);
+            yield return Seconds(3f);
+            var gate = GateAt(f[3]);
+            Log("Together: " + GateStatus(gate));
+            if (Lead && gate != null && !gate.isEncounterActive)
+            {
+                try { gate.LaunchStartEncounterAction(Me); Log("Started the fight here."); } catch (Exception e) { Log("(start: " + e.Message + ")"); }
+            }
+            Flag("enc-started");
+            for (float t = 0f; t < 25f && LiveMonsters().Count == 0; t += 1f) yield return Seconds(1f);
+            yield return Seconds(3f);
+            Log("Fight running: " + GateStatus(gate));
+            yield return Barrier("enc-fight", 60f);
+
+            bool owner = OwnRoom();
+            bool iDie = who == "owner" ? owner : who == "partner" ? !owner : false;
+            Log("We run the room: " + owner + "; we die: " + iDie + ".");
+            if (iDie)
+            {
+                Die();
+                yield return Seconds(1f);
+                Check("encounter: died", !Alive());
+                if (who != "none")
+                {
+                    yield return Seconds(4f);
+                    Check("encounter: we watch the fight instead of respawning", Spectate.Watching && Room == f[0], "watching " + Spectate.Watching + ", " + Room);
+                }
+                yield return Until(() => InGame() && Alive() && GameplayState(), 150f, "the respawn");
+                Protect = true;
+                Log("Respawned: " + GateStatus(GateAt(f[3])));
+                yield return Until(() => HasFlag(Other, "enc-finished"), 150f, "the partner to finish the fight");
+                var back = GoTo(spot, f[0], 20f);
+                while (back.MoveNext()) yield return back.Current;
+                yield return Seconds(6f);
+                var g2 = GateAt(f[3]);
+                Log("Back in the room: " + GateStatus(g2));
+                Check("encounter: the finished fight stays finished for us", g2 == null || !g2.isEncounterActive, GateStatus(g2));
+            }
+            else
+            {
+                if (who != "none") yield return Until(PartnerDead, 15f, "the partner to fall");
+                yield return Seconds(3f);
+                Log("After the partner fell: " + GateStatus(gate));
+                Check("encounter: the fight runs in our game too", gate != null && gate.isEncounterActive, GateStatus(gate));
+                Check("encounter: we run the room", who == "none" || OwnRoom(), GateStatus(gate));
+                for (float t = 0f; t < 50f && gate != null && gate.isEncounterActive; t += 2f)
+                {
+                    if (owner || OwnRoom() || who == "none") HitAllMonsters();
+                    yield return Seconds(2f);
+                    if (((int)t) % 10 == 0) Log("+" + t + "s: " + GateStatus(gate));
+                }
+                Log("End: " + GateStatus(gate));
+                try
+                {
+                    if (gate != null && gate.isEncounterActive)
+                        foreach (var list in new[] { gate.firstSpawners, gate.customSpawners })
+                            if (list != null)
+                                foreach (var e in list)
+                                {
+                                    var sp = e != null ? e.GetComponent<MobsSpawner>() : null;
+                                    if (sp == null) { Log("  spawner? " + (e != null ? e.name : "null")); continue; }
+                                    var names = new System.Collections.Generic.List<string>();
+                                    if (sp.aliveSpawnedMobs != null) foreach (var m in sp.aliveSpawnedMobs) {
+                                        if (m == null) { names.Add("null"); continue; }
+                                        string reg = " (not registered)";
+                                        if (MobRegistry.IdOf.TryGetValue(m.Pointer, out var mid))
+                                            reg = " #" + mid + " inList " + (MobRegistry.ById.TryGetValue(mid, out var same) && same != null && same.Pointer == m.Pointer) + " room " + MobRegistry.RoomOf(mid);
+                                        names.Add(m.name + reg + " at " + m.transform.position.x.ToString("0") + "," + m.transform.position.y.ToString("0") + " active " + m.gameObject.activeInHierarchy + (MobRegistry.IsAlive(m) ? "" : " dead"));
+                                    }
+                                    Log("  spawner " + sp.name + ": allDead " + sp.allMobsDead + ", allSpawned " + sp.allMobsSpawned + ", initial " + sp.initialySpawnedMobsCount + ", spawned " + sp.spawnedMobsCount + ", dead " + sp.deadMobsCount + ", despawned " + sp.despawnedMobsCount + ", repeat " + sp.repeatingSpawnerMode + ", alive [" + string.Join("; ", names) + "]");
+                                }
+                }
+                catch (Exception e) { Log("(spawner dump: " + e.Message + ")"); }
+                Check("encounter: the fight ended and the gates opened", gate != null && !gate.isEncounterActive, GateStatus(gate));
+                Flag("enc-finished");
+                yield return Seconds(2f);
+                if (StateName().Contains("Dialogue")) Log("(a talk is up in this room: the move check needs a press a background window can't give)");
+                else
+                {
+                    var probe = MoveProbe("encounter: can move after the fight");
+                    while (probe.MoveNext()) yield return probe.Current;
+                }
+            }
+            yield return Barrier("enc-end", 200f);
         }
 
         static bool Visible(Entity mob)
